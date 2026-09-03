@@ -146,5 +146,6 @@ export function runSelfCheck(): boolean {
   return failures === 0;
 }
 
-const isMain = typeof process !== "undefined" && process.argv?.[1]?.endsWith("selfcheck.ts");
-if (isMain) process.exit(runSelfCheck() ? 0 : 1);
+declare const process: { argv?: string[]; exit(code: number): never } | undefined;
+const isMain = typeof process !== "undefined" && process?.argv?.[1]?.endsWith("selfcheck.ts");
+if (isMain) process!.exit(runSelfCheck() ? 0 : 1);
