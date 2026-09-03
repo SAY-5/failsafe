@@ -10,6 +10,9 @@ rate limited, timing out, crashing or being killed outright.
   failure-rate window and bounded probes.
 * **Retries with exponential backoff and jitter** for idempotent requests, and
   **failover across replicas** so a dead pod is skipped instead of surfaced.
+* **Adaptive concurrency limits** per replica (AIMD driven by observed
+  latency) that steer requests away from a saturated replica and shed with
+  `503` + `Retry-After` only when every replica is full.
 * **Active health checks** plus replica discovery from the Kubernetes
   EndpointSlice API (or headless DNS).
 * **Prometheus metrics** for every decision the gateway makes, with a
@@ -52,7 +55,7 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 60 tests, including an in-process failover test
+make lint test  # ruff + 75 tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
 
@@ -198,6 +201,14 @@ routes:
       consecutive_failures: 3
       open_seconds: 3.0
       half_open_max: 2
+    concurrency:               # omit to disable adaptive per-replica limits
+      initial: 32              # in-flight slots each replica starts with
+      min_limit: 4
+      max_limit: 512
+      backoff_ratio: 0.9       # multiplicative decrease on a drop or latency spike
+      rtt_tolerance: 2.5       # spike = window average above no-load RTT x tolerance
+      window: 10               # samples per adjustment
+      probe_interval: 200      # samples between no-load RTT re-estimates
 ```
 
 Retry rules: GET, HEAD, PUT, DELETE and OPTIONS are retried on connection
@@ -217,6 +228,9 @@ unless the route sets `idempotent_post` or the request carries an
 
 Proxied responses carry `X-Failsafe-Upstream` with the replica that served
 them; rate-limited responses carry `Retry-After` and `X-RateLimit-Limit`.
+When every replica is at its concurrency limit the gateway answers `503`
+with `{"error": "overloaded"}` and a `Retry-After` derived from the replicas'
+no-load latency; a replica that is merely slow is skipped, not shed.
 
 ## Metrics
 
@@ -232,6 +246,9 @@ them; rate-limited responses carry `Retry-After` and `X-RateLimit-Limit`.
 | `failsafe_upstream_healthy` | upstream | 1 when the replica passes health checks |
 | `failsafe_client_failed_requests_total` | route | 5xx returned to a client after exhausting retries; must stay 0 in chaos |
 | `failsafe_inflight_requests` | route | requests currently being proxied |
+| `failsafe_concurrency_limit` | upstream | adaptive in-flight limit currently granted to the replica |
+| `failsafe_concurrency_inflight` | upstream | calls in flight to the replica as counted by its limiter |
+| `failsafe_load_shed_total` | route | requests answered 503 because every replica was at its limit |
 
 The Grafana dashboard in `monitoring/grafana/dashboards/failsafe.json` shows
 RPS by status, latency percentiles, rate limiting, retries and failovers,
@@ -240,7 +257,8 @@ breaker state, upstream health and the client-failed counter.
 ## Layout
 
 ```
-failsafe/           gateway package (config, ratelimit, breaker, retry, upstreams, proxy, app)
+failsafe/           gateway package (config, ratelimit, breaker, concurrency, retry,
+                    upstreams, proxy, app)
 example_upstream/   orders service with env and runtime failure injection
 chaos/              load generator (run.py) and kill script (kill.sh)
 scripts/            compose-chaos.sh, k8s-chaos.sh
@@ -248,6 +266,27 @@ deploy/             docker-compose.yml, k8s/ (kustomize)
 monitoring/         prometheus.yml, grafana provisioning and dashboard
 tests/              pytest suite
 ```
+
+## Releases
+
+### v2.0.0: adaptive concurrency limits
+
+Every replica now carries an adaptive in-flight limit (`failsafe/concurrency.py`).
+The limit grows by one per window of calls that complete within the replica's
+no-load latency while the replica is at least half busy, and is cut by
+`backoff_ratio` on a timeout, reset, 5xx or a window whose average latency
+exceeds `rtt_tolerance` times the no-load RTT. The pool skips replicas that are
+at their limit, so a request is only shed (`503`, `Retry-After`) when no
+healthy replica has a free slot. New metrics: `failsafe_concurrency_limit`,
+`failsafe_concurrency_inflight`, `failsafe_load_shed_total`; the chaos summary
+prints the shed count. 13 new tests (75 total).
+
+### v1.0.0: initial release
+
+Token-bucket rate limiting, per-replica circuit breakers, retries with
+full-jitter backoff and replica failover, active health checks, EndpointSlice
+discovery, Prometheus metrics with a Grafana dashboard, compose and kind chaos
+suites. 62 tests.
 
 ## License
 

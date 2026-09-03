@@ -7,6 +7,7 @@ through four stages, each backed by a small, independently tested module.
 client ──> route match ──> token bucket ──> forward (retry + failover) ──> upstream replica
                               │                 │
                               429               ├── breaker per replica
+                                                ├── concurrency limit per replica (503 when all full)
                                                 ├── health state per replica
                                                 └── Prometheus counters
 ```
@@ -56,6 +57,32 @@ The state transition hook feeds `failsafe_breaker_state` and
 `failsafe_breaker_transitions_total`. Because the breaker is per replica, an
 open breaker simply removes that replica from rotation; the route stays up on
 the remaining replicas.
+
+## Adaptive concurrency limits (`concurrency.py`)
+
+Each replica has an `AdaptiveLimiter` that bounds how many calls may be in
+flight to it. The forwarder acquires a slot when the pool picks the replica
+and releases it with the attempt's outcome and round-trip time. The bound is
+tuned with additive increase / multiplicative decrease:
+
+* the smallest RTT seen is the no-load estimate; every `probe_interval`
+  samples it is reset to the current sample so a service that became slower
+  for good is not penalised forever;
+* every `window` successful samples are judged on their average: above
+  `no_load_rtt * rtt_tolerance` the limit is cut to `floor(limit * backoff_ratio)`,
+  otherwise, if the window ran at least half the limit in flight, the limit
+  grows by one. Judging the average rather than each call keeps ordinary
+  jitter from shrinking the limit;
+* a timeout, reset or retryable 5xx cuts the limit immediately; a refused
+  connection says nothing about load and only frees the slot.
+
+`pick()` skips replicas without a free slot before it consults the breaker, so
+a replica that is slow but alive stops receiving new work while its siblings
+carry it. Only when every healthy replica is full does the gateway answer
+`503` with `Retry-After` set to one no-load RTT (at least a second once
+rounded); that outcome is counted in `failsafe_load_shed_total`, not in
+`failsafe_client_failed_requests_total`, because the request was never
+attempted. The limit and in-flight count are exported per replica.
 
 ## Retries and failover (`retry.py`, `proxy.py`)
 
