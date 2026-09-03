@@ -70,7 +70,10 @@ class Gateway:
                 follow_redirects=False,
             )
         self.forwarder = Forwarder(
-            self._client, trust_proxy=self.config.trust_proxy_headers, rng=self.rng
+            self._client,
+            trust_proxy=self.config.trust_proxy_headers,
+            rng=self.rng,
+            clock=self.clock,
         )
         self.checker = HealthChecker(self.pools, self.config.health_check)
         await self.checker.start()
