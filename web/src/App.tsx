@@ -1,4 +1,5 @@
 import { Nav } from "./components/Nav";
+import { BucketSection } from "./sections/BucketSection";
 import { Hero } from "./sections/Hero";
 
 export default function App() {
@@ -9,7 +10,9 @@ export default function App() {
       </a>
       <Nav />
       <Hero />
-      <main id="main" />
+      <main id="main">
+        <BucketSection />
+      </main>
     </>
   );
 }
