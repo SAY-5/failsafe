@@ -73,16 +73,20 @@ KILLER_PID=$!
 
 echo "heartbeat: waiting for the load generator to finish"
 for _ in $(seq 1 $((DURATION + 90))); do
-  phase=$(kubectl -n "$NS" get pod loadgen -o jsonpath='{.status.phase}')
-  [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ] && break
+  phase=$(kubectl -n "$NS" get pod loadgen -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  if [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; then break; fi
   sleep 1
 done
 wait "$KILLER_PID" 2>/dev/null || true
 
-kubectl -n "$NS" logs loadgen | tee "$OUT/k8s-summary.txt"
+for _ in 1 2 3 4 5; do
+  kubectl -n "$NS" logs loadgen > "$OUT/k8s-summary.txt" 2>/dev/null && break
+  sleep 3
+done
+cat "$OUT/k8s-summary.txt"
 echo "kill timeline (UTC):"
 sed 's/^/  /' "$OUT/k8s-kills.log"
-kubectl -n "$NS" get pods -l app=upstream
+kubectl -n "$NS" get pods -l app=upstream || true
 
 result=$(grep '^CHAOS_RESULT ' "$OUT/k8s-summary.txt" | tail -1 | sed 's/^CHAOS_RESULT //')
 failed=$(printf '%s' "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client_failed_requests"])')

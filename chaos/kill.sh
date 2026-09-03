@@ -36,7 +36,8 @@ while [ $SECONDS -lt $end ]; do
       ;;
     k8s)
       pods=($(kubectl -n "$NAMESPACE" get pods -l app=upstream \
-        --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}'))
+        --field-selector=status.phase=Running -o jsonpath='{.items[*].metadata.name}' \
+        2>/dev/null || true))
       if [ ${#pods[@]} -eq 0 ]; then sleep 1; continue; fi
       target=${pods[$((RANDOM % ${#pods[@]}))]}
       kubectl -n "$NAMESPACE" delete pod "$target" --grace-period=0 --force --wait=false \
@@ -45,8 +46,10 @@ while [ $SECONDS -lt $end ]; do
       # One pod at a time: wait until the Deployment replaced it before the next kill,
       # otherwise the experiment measures total outage rather than failover.
       for _ in $(seq 1 60); do
-        want=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.spec.replicas}')
-        have=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.status.readyReplicas}')
+        want=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.spec.replicas}' \
+          2>/dev/null || echo 3)
+        have=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.status.readyReplicas}' \
+          2>/dev/null || echo 0)
         [ "${have:-0}" = "$want" ] && break
         sleep 1
       done
