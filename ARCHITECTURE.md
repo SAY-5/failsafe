@@ -98,12 +98,17 @@ every `interval_seconds`, hitting each replica's health path; a replica
 becomes unhealthy after `unhealthy_threshold` failures and healthy again
 after `healthy_threshold` successes.
 
-With `dns:` configured the pool resolves the name on every round. Kubernetes
-headless Services publish one A record per ready pod, so new pods are
-discovered as soon as their readiness probe passes and deleted pods vanish
-from the set. Newly discovered replicas start healthy because the Service
-already vouched for them; the passive connection-failure path corrects that
-within a single request if the record is stale.
+Replica discovery runs at the start of every round. With `kubernetes:`
+configured the pool lists the Service's EndpointSlices through the API server
+(service account token, namespaced read-only Role) and keeps exactly the
+addresses whose `ready` condition is true. This reflects a replaced pod within
+about a second. `dns:` is also supported and resolves a headless Service name,
+but cluster DNS caches those answers (kubeadm and kind ship CoreDNS with a 30
+second TTL), which is too slow when pods are being replaced under load; the
+first kind chaos run with DNS discovery showed the gateway lagging 20 to 30
+seconds behind the real pod set. Newly discovered replicas start healthy
+because the Service already vouched for them; the passive connection-failure
+path corrects that within a single request if an entry is stale.
 
 ## Kubernetes deployment
 

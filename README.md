@@ -10,7 +10,8 @@ rate limited, timing out, crashing or being killed outright.
   failure-rate window and bounded probes.
 * **Retries with exponential backoff and jitter** for idempotent requests, and
   **failover across replicas** so a dead pod is skipped instead of surfaced.
-* **Active health checks** plus DNS discovery of Kubernetes headless Services.
+* **Active health checks** plus replica discovery from the Kubernetes
+  EndpointSlice API (or headless DNS).
 * **Prometheus metrics** for every decision the gateway makes, with a
   provisioned Grafana dashboard.
 * **Kubernetes manifests** with liveness and readiness probes and zero
@@ -133,7 +134,10 @@ health_check:
 upstreams:
   orders:
     replicas: [http://upstream-1:9000, http://upstream-2:9000]   # static list
-    # dns: upstream.failsafe.svc.cluster.local.   # or a headless Service
+    # kubernetes:                # or the ready endpoints of a Service
+    #   service: upstream
+    #   namespace: failsafe      # defaults to the pod's own namespace
+    # dns: upstream.failsafe.svc.cluster.local.   # or headless DNS (TTL-bound)
     # port: 9000
     health_path: /health
 
