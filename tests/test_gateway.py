@@ -44,8 +44,9 @@ async def test_health_and_readiness_endpoints(harness_factory):
 
 async def test_rate_limit_returns_429_with_retry_after(harness_factory):
     h = await harness_factory(1, rate_limit={"capacity": 3, "refill_per_second": 1})
-    codes = [(await h.client.get("/orders/1", headers={"X-API-Key": "k1"})).status_code
-             for _ in range(5)]
+    codes = [
+        (await h.client.get("/orders/1", headers={"X-API-Key": "k1"})).status_code for _ in range(5)
+    ]
     assert codes == [200, 200, 200, 429, 429]
     r = await h.client.get("/orders/1", headers={"X-API-Key": "k1"})
     assert r.status_code == 429
@@ -103,9 +104,12 @@ async def test_breaker_opens_and_fast_fails_then_recovers(harness_factory):
     await asyncio.sleep(0.35)
     assert (await h.client.get("/orders/1")).status_code == 200
     assert replica.breaker.state is State.CLOSED
-    assert counter_value(
-        "failsafe_breaker_transitions_total", from_state="half_open", to_state="closed"
-    ) >= 1
+    assert (
+        counter_value(
+            "failsafe_breaker_transitions_total", from_state="half_open", to_state="closed"
+        )
+        >= 1
+    )
 
 
 async def test_timeout_fails_over_to_next_replica(harness_factory):

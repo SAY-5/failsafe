@@ -109,5 +109,6 @@ class FakeUpstream:
             f"HTTP/1.1 {status} {reason}\r\n"
             f"Content-Type: application/json\r\n"
             f"Content-Length: {len(data)}\r\n"
-            f"X-Served-By: fake\r\n\r\n".encode() + data
+            f"X-Served-By: fake\r\n\r\n".encode()
+            + data
         )

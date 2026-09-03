@@ -138,8 +138,12 @@ class UpstreamPool:
         if replica.healthy != healthy:
             replica.healthy = healthy
             metrics.UPSTREAM_HEALTHY.labels(upstream=replica.label).set(int(healthy))
-            log.info("upstream %s replica %s -> %s", self.name, replica.label,
-                     "healthy" if healthy else "unhealthy")
+            log.info(
+                "upstream %s replica %s -> %s",
+                self.name,
+                replica.label,
+                "healthy" if healthy else "unhealthy",
+            )
         if healthy:
             replica.consecutive_fail = 0
             replica.consecutive_ok = 0
