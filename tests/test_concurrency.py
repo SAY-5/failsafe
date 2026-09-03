@@ -31,32 +31,33 @@ def test_acquire_refuses_at_limit_and_release_frees():
 
 
 def test_limit_grows_by_one_per_window_of_fast_calls_at_load():
-    lim, _ = make(initial=4, min_limit=1, max_limit=10)
+    lim, _ = make(initial=4, min_limit=1, max_limit=10, window=4)
     at_load(lim, 0.01, 4)
-    assert lim.limit == 5  # 4 fast calls at full load: +1/4 each
+    assert lim.limit == 5
     at_load(lim, 0.01, 200)
     assert lim.limit == 10  # capped at max_limit
 
 
 def test_limit_does_not_grow_while_idle():
-    lim, _ = make(initial=10, min_limit=1)
+    lim, _ = make(initial=10, min_limit=1, window=5)
     for _ in range(50):
         assert lim.acquire()
         lim.release(0.01)  # one call in flight against a limit of 10
     assert lim.limit == 10
 
 
-def test_limit_shrinks_on_latency_spike():
-    lim, _ = make(initial=20, min_limit=1, rtt_tolerance=2.0, backoff_ratio=0.5)
-    at_load(lim, 0.010, 20)
+def test_limit_shrinks_when_window_average_spikes_not_on_one_slow_call():
+    lim, _ = make(initial=20, min_limit=1, rtt_tolerance=2.0, backoff_ratio=0.5, window=5)
+    at_load(lim, 0.010, 5)
     assert lim.no_load_rtt == pytest.approx(0.010)
     assert lim.limit == 21
+    at_load(lim, 0.019, 5)  # under 2x: still fine
+    assert lim.limit == 22
     lim.acquire()
-    lim.release(0.019)  # under 2x: still fine
-    assert lim.limit == 21
-    lim.acquire()
-    lim.release(0.030)  # 3x the no-load RTT
-    assert lim.limit == 10
+    lim.release(0.100)  # one outlier inside a window is not a spike
+    assert lim.limit == 22
+    at_load(lim, 0.030, 4)  # completes the window at an average of 3x
+    assert lim.limit == 11
 
 
 def test_limit_shrinks_on_dropped_call_and_respects_min():
@@ -77,7 +78,7 @@ def test_connect_failure_release_leaves_limit_alone():
 
 
 def test_probe_interval_lets_no_load_rtt_rise():
-    lim, _ = make(initial=4, min_limit=1, probe_interval=5, rtt_tolerance=2.0)
+    lim, _ = make(initial=4, min_limit=1, window=1, probe_interval=5, rtt_tolerance=2.0)
     for _ in range(4):
         lim.acquire()
         lim.release(0.010)
@@ -105,3 +106,5 @@ def test_rejects_bad_parameters():
         AdaptiveLimiter(backoff_ratio=1.0)
     with pytest.raises(ValueError):
         AdaptiveLimiter(rtt_tolerance=0.5)
+    with pytest.raises(ValueError):
+        AdaptiveLimiter(window=0)

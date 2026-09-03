@@ -186,6 +186,7 @@ class UpstreamPool:
             max_limit=c.max_limit,
             backoff_ratio=c.backoff_ratio,
             rtt_tolerance=c.rtt_tolerance,
+            window=c.window,
             probe_interval=c.probe_interval,
             on_update=lambda lim: metrics.set_concurrency(lim.name, lim.limit, lim.inflight),
         )

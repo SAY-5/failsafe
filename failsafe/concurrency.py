@@ -2,10 +2,10 @@
 
 The limit is adjusted with additive increase / multiplicative decrease driven by
 observed round-trip time, in the spirit of TCP Vegas: a replica that keeps
-answering within its no-load latency earns one more in-flight slot per
-window of successful calls; a latency spike or a dropped call cuts the limit
-by `backoff_ratio`. Requests beyond the limit are shed at the gateway instead
-of queueing on a replica that is already saturated.
+answering within its no-load latency earns one more in-flight slot per window
+of calls; a latency spike or a dropped call cuts the limit by `backoff_ratio`.
+Requests beyond the limit are shed at the gateway instead of queueing on a
+replica that is already saturated.
 """
 
 from __future__ import annotations
@@ -21,11 +21,14 @@ class AdaptiveLimiter:
     """Bounds the number of in-flight calls to one replica and tunes that bound.
 
     * `acquire()` admits a call while `inflight < limit` and counts it.
-    * `release(rtt, dropped=...)` frees the slot and feeds the sample back:
-        - `dropped` (timeout, reset, 5xx): `limit *= backoff_ratio`
-        - `rtt > no_load_rtt * rtt_tolerance`: same multiplicative decrease
-        - otherwise, when at least half of the limit was in use, one credit is
-          earned; `limit` credits raise the limit by one (additive increase)
+    * `release(rtt, dropped=...)` frees the slot and feeds the sample back.
+        - `dropped` (timeout, reset, 5xx) cuts the limit immediately:
+          `limit = floor(limit * backoff_ratio)`.
+        - Successful samples are judged once per `window` samples on their
+          average, so jitter on a single call is not a spike: if the average
+          exceeds `no_load_rtt * rtt_tolerance` the limit is cut the same way;
+          otherwise, when the window ran at least half the limit in flight,
+          the limit grows by one.
     * `no_load_rtt` is the smallest RTT seen since the last probe; every
       `probe_interval` samples it is reset to the current sample so a service
       that became permanently slower is not punished forever.
@@ -42,6 +45,7 @@ class AdaptiveLimiter:
         max_limit: int = 1000,
         backoff_ratio: float = 0.9,
         rtt_tolerance: float = 2.0,
+        window: int = 10,
         probe_interval: int = 200,
         on_update: Hook | None = None,
     ) -> None:
@@ -51,21 +55,24 @@ class AdaptiveLimiter:
             raise ValueError("backoff_ratio must be in (0, 1)")
         if rtt_tolerance <= 1:
             raise ValueError("rtt_tolerance must be > 1")
-        if probe_interval < 1:
-            raise ValueError("probe_interval must be >= 1")
+        if window < 1 or probe_interval < 1:
+            raise ValueError("window and probe_interval must be >= 1")
         self.name = name
         self.min_limit = min_limit
         self.max_limit = max_limit
         self.backoff_ratio = backoff_ratio
         self.rtt_tolerance = rtt_tolerance
+        self.window = window
         self.probe_interval = probe_interval
         self.on_update = on_update
 
         self._limit = float(initial)
-        self._credits = 0
         self._inflight = 0
         self._no_load_rtt: float | None = None
         self._samples = 0
+        self._win_n = 0
+        self._win_rtt = 0.0
+        self._win_load = 0
         self._lock = threading.Lock()
 
     # ---- inspection -------------------------------------------------------
@@ -114,21 +121,29 @@ class AdaptiveLimiter:
 
     def _sample(self, rtt: float, inflight: int) -> None:
         self._samples += 1
-        if self._no_load_rtt is None or self._samples % self.probe_interval == 0:
-            self._no_load_rtt = rtt
-        else:
-            self._no_load_rtt = min(self._no_load_rtt, rtt)
-        if rtt > self._no_load_rtt * self.rtt_tolerance:
+        probe = self._no_load_rtt is None or self._samples % self.probe_interval == 0
+        self._no_load_rtt = rtt if probe else min(self._no_load_rtt, rtt)
+        self._win_n += 1
+        self._win_rtt += rtt
+        self._win_load += inflight
+        if self._win_n < self.window:
+            return
+        avg_rtt = self._win_rtt / self._win_n
+        avg_load = self._win_load / self._win_n
+        self._reset_window()
+        if not probe and avg_rtt > self._no_load_rtt * self.rtt_tolerance:
             self._decrease()
-        elif inflight * 2 >= int(self._limit):
-            self._credits += 1
-            if self._credits >= int(self._limit):
-                self._credits = 0
-                self._limit = min(float(self.max_limit), self._limit + 1.0)
+        elif avg_load * 2 >= int(self._limit):
+            self._limit = min(float(self.max_limit), self._limit + 1.0)
 
     def _decrease(self) -> None:
-        self._credits = 0
+        self._reset_window()
         self._limit = max(float(self.min_limit), math.floor(self._limit * self.backoff_ratio))
+
+    def _reset_window(self) -> None:
+        self._win_n = 0
+        self._win_rtt = 0.0
+        self._win_load = 0
 
     def _notify(self) -> None:
         if self.on_update is not None:

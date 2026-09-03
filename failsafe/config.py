@@ -65,6 +65,7 @@ class ConcurrencyConfig:
     max_limit: int = 1000
     backoff_ratio: float = 0.9
     rtt_tolerance: float = 2.0
+    window: int = 10
     probe_interval: int = 200
 
     def __post_init__(self) -> None:
@@ -76,8 +77,8 @@ class ConcurrencyConfig:
             raise ValueError("concurrency.backoff_ratio must be in (0, 1)")
         if self.rtt_tolerance <= 1:
             raise ValueError("concurrency.rtt_tolerance must be > 1")
-        if self.probe_interval < 1:
-            raise ValueError("concurrency.probe_interval must be >= 1")
+        if self.window < 1 or self.probe_interval < 1:
+            raise ValueError("concurrency.window and probe_interval must be >= 1")
 
 
 @dataclass(frozen=True)
