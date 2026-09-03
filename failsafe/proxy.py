@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import Mapping
 
 import httpx
@@ -13,6 +14,7 @@ from starlette.responses import JSONResponse, Response
 
 from failsafe import metrics
 from failsafe.config import RouteConfig
+from failsafe.ratelimit import retry_after_header
 from failsafe.retry import FailureKind, RetryPolicy, is_idempotent
 from failsafe.upstreams import Replica, UpstreamPool
 
@@ -98,19 +100,26 @@ class Forwarder:
             if replica is None and tried:
                 replica = pool.pick()  # every replica was tried once; allow a second pass
             if replica is None:
+                if pool.saturated():
+                    return self._shed(route, pool)
                 return self._fail(route, prev, 503, "no healthy upstream replica")
             attempt += 1
             tried.add(replica.url)
             if prev is not None and prev is not replica:
                 metrics.FAILOVERS.labels(from_upstream=prev.label, to_upstream=replica.label).inc()
 
+            sent = time.perf_counter()
             try:
                 resp = await self.client.request(
                     method, replica.url + path, content=body, headers=headers, timeout=timeout
                 )
             except httpx.HTTPError as exc:
                 kind = _classify(exc)
-                pool.report_failure(replica, connection_failed=kind is FailureKind.CONNECT)
+                pool.report_failure(
+                    replica,
+                    connection_failed=kind is FailureKind.CONNECT,
+                    latency=time.perf_counter() - sent,
+                )
                 if policy.should_retry(attempt, kind, idempotent):
                     await self._retry(route, kind, attempt)
                     prev = replica
@@ -118,15 +127,16 @@ class Forwarder:
                 status = 504 if kind is FailureKind.TIMEOUT else 502
                 return self._fail(route, replica, status, f"{kind.value}: {exc!s}"[:200])
 
+            latency = time.perf_counter() - sent
             if policy.retryable_status(resp.status_code):
-                pool.report_failure(replica, connection_failed=False)
+                pool.report_failure(replica, connection_failed=False, latency=latency)
                 if policy.should_retry(attempt, FailureKind.STATUS, idempotent):
                     await self._retry(route, FailureKind.STATUS, attempt)
                     prev = replica
                     continue
                 return self._relay(route, replica, resp)
 
-            pool.report_success(replica)
+            pool.report_success(replica, latency)
             return self._relay(route, replica, resp)
 
     async def _retry(self, route: RouteConfig, kind: FailureKind, attempt: int) -> None:
@@ -155,6 +165,17 @@ class Forwarder:
         headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESPONSE_STRIP}
         headers["x-failsafe-upstream"] = replica.label
         return Response(content=resp.content, status_code=resp.status_code, headers=headers)
+
+    @staticmethod
+    def _shed(route: RouteConfig, pool: UpstreamPool) -> Response:
+        """Every replica that could serve the call is at its concurrency limit."""
+        metrics.LOAD_SHED.labels(route=route.prefix).inc()
+        metrics.REQUESTS.labels(route=route.prefix, upstream="-", status="503").inc()
+        return JSONResponse(
+            {"error": "overloaded", "detail": "all replicas at concurrency limit"},
+            status_code=503,
+            headers={"Retry-After": retry_after_header(pool.retry_after())},
+        )
 
     @staticmethod
     def _fail(route: RouteConfig, replica: Replica | None, status: int, detail: str) -> Response:

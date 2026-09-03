@@ -37,10 +37,16 @@ class Gateway:
         self.clock = clock
         self.rng = rng or random.Random()
         breaker_by_upstream = {}
+        concurrency_by_upstream = {}
         for route in config.routes:
             breaker_by_upstream.setdefault(route.upstream, route.breaker)
+            concurrency_by_upstream.setdefault(route.upstream, route.concurrency)
         self.pools: dict[str, UpstreamPool] = build_pools(
-            config.upstreams, breaker_by_upstream, config.health_check, clock=clock
+            config.upstreams,
+            breaker_by_upstream,
+            config.health_check,
+            concurrency_by_upstream=concurrency_by_upstream,
+            clock=clock,
         )
         self.limiters: dict[str, RateLimiter] = {
             r.prefix: RateLimiter(
