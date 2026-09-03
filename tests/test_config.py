@@ -67,6 +67,23 @@ def test_concurrency_is_optional_and_validated():
         from_dict(base(concurrency={"rtt_tolerance": 1.0}))
 
 
+def test_hedge_and_deadline_are_optional_and_validated():
+    r = from_dict(base()).routes[0]
+    assert r.hedge is None and r.deadline_seconds is None
+    r = from_dict(base(hedge={"after_ms": 25}, deadline_seconds=3)).routes[0]
+    assert r.hedge.after_ms == 25 and r.hedge.percentile == 95.0
+    assert r.deadline_seconds == 3.0
+    assert from_dict(base(hedge={})).routes[0].hedge.after_ms is None
+    with pytest.raises(ValueError):
+        from_dict(base(hedge={"after_ms": -1}))
+    with pytest.raises(ValueError):
+        from_dict(base(hedge={"percentile": 100}))
+    with pytest.raises(ValueError):
+        from_dict(base(hedge={"min_samples": 50, "window": 10}))
+    with pytest.raises(ValueError):
+        from_dict(base(deadline_seconds=0))
+
+
 def test_env_expansion_and_dns_upstream(monkeypatch):
     monkeypatch.setenv("SVC_HOST", "svc.ns.svc.cluster.local")
     cfg = from_dict(

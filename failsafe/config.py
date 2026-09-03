@@ -82,6 +82,25 @@ class ConcurrencyConfig:
 
 
 @dataclass(frozen=True)
+class HedgeConfig:
+    """Hedged requests: a second attempt on another replica once the first one
+    has taken longer than the route's observed latency percentile."""
+
+    after_ms: float | None = None  # fixed delay; None derives it from `percentile`
+    percentile: float = 95.0
+    min_samples: int = 20
+    window: int = 1000
+
+    def __post_init__(self) -> None:
+        if self.after_ms is not None and self.after_ms < 0:
+            raise ValueError("hedge.after_ms must be >= 0")
+        if not 0 < self.percentile < 100:
+            raise ValueError("hedge.percentile must be in (0, 100)")
+        if self.min_samples < 1 or self.window < self.min_samples:
+            raise ValueError("hedge window must satisfy 1 <= min_samples <= window")
+
+
+@dataclass(frozen=True)
 class HealthCheckConfig:
     interval_seconds: float = 2.0
     timeout_seconds: float = 1.0
@@ -116,12 +135,16 @@ class RouteConfig:
     retry: RetryConfig = field(default_factory=RetryConfig)
     breaker: BreakerConfig = field(default_factory=BreakerConfig)
     concurrency: ConcurrencyConfig | None = None
+    hedge: HedgeConfig | None = None
+    deadline_seconds: float | None = None  # default end-to-end budget per request
 
     def __post_init__(self) -> None:
         if not self.prefix.startswith("/"):
             raise ValueError(f"route prefix must start with '/': {self.prefix!r}")
         if self.timeout_seconds <= 0 or self.connect_timeout_seconds <= 0:
             raise ValueError("route timeouts must be > 0")
+        if self.deadline_seconds is not None and self.deadline_seconds <= 0:
+            raise ValueError("route deadline_seconds must be > 0")
 
 
 @dataclass(frozen=True)
@@ -179,6 +202,8 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
     for r in raw.get("routes") or []:
         rl = r.get("rate_limit", {})
         cc = r.get("concurrency")
+        hd = r.get("hedge")
+        dl = r.get("deadline_seconds")
         routes.append(
             RouteConfig(
                 prefix=r["prefix"],
@@ -190,6 +215,8 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
                 retry=RetryConfig(**_tuplify(r.get("retry", {}), "retry_on_status")),
                 breaker=BreakerConfig(**r.get("breaker", {})),
                 concurrency=None if cc is None else ConcurrencyConfig(**cc),
+                hedge=None if hd is None else HedgeConfig(**hd),
+                deadline_seconds=None if dl is None else float(dl),
             )
         )
 
