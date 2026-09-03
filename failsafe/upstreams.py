@@ -6,9 +6,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import socket
+import statistics
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +22,13 @@ import httpx
 from failsafe import metrics
 from failsafe.breaker import CircuitBreaker, State
 from failsafe.concurrency import AdaptiveLimiter
-from failsafe.config import BreakerConfig, ConcurrencyConfig, HealthCheckConfig, UpstreamConfig
+from failsafe.config import (
+    BreakerConfig,
+    ConcurrencyConfig,
+    HealthCheckConfig,
+    OutlierConfig,
+    UpstreamConfig,
+)
 
 log = logging.getLogger("failsafe.upstreams")
 
@@ -112,19 +121,38 @@ class Replica:
     consecutive_ok: int = 0
     consecutive_fail: int = 0
     last_checked: float = 0.0
+    clock: Callable[[], float] = time.monotonic
+    stats_window: int = 100
+    ejected_until: float = 0.0
+    ejections: int = 0
     label: str = field(init=False)
+    stats: deque[tuple[bool, float]] = field(init=False)  # (ok, latency) recent outcomes
 
     def __post_init__(self) -> None:
         parts = urlsplit(self.url)
         self.label = parts.netloc or self.url
+        self.stats = deque(maxlen=self.stats_window)
         metrics.UPSTREAM_HEALTHY.labels(upstream=self.label).set(int(self.healthy))
+        metrics.UPSTREAM_EJECTED.labels(upstream=self.label).set(0)
         metrics.set_breaker_state(self.label, self.breaker.state)
         if self.limiter is not None:
             metrics.set_concurrency(self.label, self.limiter.limit, self.limiter.inflight)
 
     @property
+    def ejected(self) -> bool:
+        return self.ejected_until > self.clock()
+
+    @property
     def available(self) -> bool:
-        return self.healthy and self.breaker.state is not State.OPEN
+        return self.healthy and self.breaker.state is not State.OPEN and not self.ejected
+
+    @property
+    def error_rate(self) -> float:
+        return sum(1 for ok, _ in self.stats if not ok) / len(self.stats) if self.stats else 0.0
+
+    @property
+    def mean_latency(self) -> float:
+        return statistics.fmean(lat for _, lat in self.stats) if self.stats else 0.0
 
     @property
     def has_capacity(self) -> bool:
@@ -140,6 +168,7 @@ class UpstreamPool:
         breaker_cfg: BreakerConfig | None = None,
         health_cfg: HealthCheckConfig | None = None,
         concurrency_cfg: ConcurrencyConfig | None = None,
+        outlier_cfg: OutlierConfig | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -148,6 +177,7 @@ class UpstreamPool:
         self.breaker_cfg = breaker_cfg or BreakerConfig()
         self.health_cfg = health_cfg or HealthCheckConfig()
         self.concurrency_cfg = concurrency_cfg
+        self.outlier_cfg = outlier_cfg
         self.clock = clock
         self._replicas: dict[str, Replica] = {}
         self._rr = 0
@@ -198,6 +228,8 @@ class UpstreamPool:
             breaker=self._make_breaker(label),
             limiter=self._make_limiter(label),
             healthy=healthy,
+            clock=self.clock,
+            stats_window=self.outlier_cfg.window if self.outlier_cfg else 100,
         )
         self._replicas[url] = r
         return r
@@ -206,6 +238,12 @@ class UpstreamPool:
         r = self._replicas.pop(url, None)
         if r is not None:
             metrics.UPSTREAM_HEALTHY.labels(upstream=r.label).set(0)
+            metrics.UPSTREAM_EJECTED.labels(upstream=r.label).set(0)
+
+    def resolve(self, entries: tuple[str, ...] | list[str]) -> set[str]:
+        """URLs of the replicas named by URL or host:port label."""
+        wanted = {e.rstrip("/") for e in entries}
+        return {r.url for r in self._replicas.values() if r.url in wanted or r.label in wanted}
 
     @property
     def replicas(self) -> list[Replica]:
@@ -222,19 +260,36 @@ class UpstreamPool:
 
     # ---- selection --------------------------------------------------------
 
-    def pick(self, exclude: frozenset[str] | set[str] = frozenset()) -> Replica | None:
-        """Round-robin over healthy replicas with spare concurrency whose breaker admits the call.
+    def pick(
+        self,
+        exclude: frozenset[str] | set[str] = frozenset(),
+        prefer: set[str] | None = None,
+    ) -> Replica | None:
+        """Round-robin over healthy, non-ejected replicas with spare concurrency whose
+        breaker admits the call.
 
+        With `prefer` (a set of URLs, for canary routing) the preferred replicas
+        are tried first and the rest only when none of them can take the call.
         `breaker.allow()` is only invoked on the replica actually returned, so a
         half-open breaker's probe budget is consumed by real attempts only. The
         returned replica has one limiter slot acquired; `report_success` or
         `report_failure` releases it.
         """
+        if prefer is None:
+            return self._pick(exclude, None)
+        r = self._pick(exclude, prefer)
+        if r is None:
+            r = self._pick(exclude, {x.url for x in self.replicas} - prefer)
+        return r
+
+    def _pick(self, exclude: frozenset[str] | set[str], subset: set[str] | None) -> Replica | None:
         reps = self.replicas
         n = len(reps)
         for i in range(n):
             r = reps[(self._rr + i) % n]
-            if r.url in exclude or not r.healthy or not r.has_capacity:
+            if subset is not None and r.url not in subset:
+                continue
+            if r.url in exclude or not r.available or not r.has_capacity:
                 continue
             if r.breaker.allow():
                 if r.limiter is not None:
@@ -259,6 +314,8 @@ class UpstreamPool:
         replica.breaker.record_success()
         if replica.limiter is not None:
             replica.limiter.release(latency)
+        if latency is not None:
+            replica.stats.append((True, latency))
 
     def report_cancelled(self, replica: Replica) -> None:
         """An attempt was abandoned (hedge lost): free the slot, record no outcome."""
@@ -274,6 +331,77 @@ class UpstreamPool:
             replica.limiter.release(None, dropped=not connection_failed)
         if connection_failed and replica.healthy:
             self._set_health(replica, False)
+        elif not connection_failed:
+            replica.stats.append((False, latency or 0.0))
+
+    # ---- outlier ejection -------------------------------------------------
+
+    def eject(
+        self, replica: Replica, seconds: float | None = None, *, reason: str = "manual"
+    ) -> None:
+        """Take the replica out of rotation for `seconds` (default: the configured
+        cool-down times the number of ejections so far, capped)."""
+        replica.ejections += 1
+        if seconds is None:
+            o = self.outlier_cfg or OutlierConfig()
+            seconds = min(o.max_ejection_seconds, o.base_ejection_seconds * replica.ejections)
+        replica.ejected_until = self.clock() + seconds
+        replica.stats.clear()
+        metrics.OUTLIER_EJECTIONS.labels(upstream=replica.label, reason=reason).inc()
+        metrics.UPSTREAM_EJECTED.labels(upstream=replica.label).set(1)
+        log.warning(
+            "upstream %s replica %s ejected for %.1fs (%s, ejection #%d)",
+            self.name,
+            replica.label,
+            seconds,
+            reason,
+            replica.ejections,
+        )
+
+    def readmit(self, replica: Replica) -> None:
+        if replica.ejected_until == 0.0:
+            return
+        replica.ejected_until = 0.0
+        replica.stats.clear()
+        metrics.UPSTREAM_EJECTED.labels(upstream=replica.label).set(0)
+        log.info("upstream %s replica %s readmitted", self.name, replica.label)
+
+    def detect_outliers(self) -> list[Replica]:
+        """Readmit replicas whose cool-down expired, then eject the ones whose error
+        rate or mean latency stands out from their peers. Returns the newly ejected."""
+        now = self.clock()
+        for r in self.replicas:
+            if r.ejected_until and r.ejected_until <= now:
+                self.readmit(r)
+        o = self.outlier_cfg
+        if o is None:
+            return []
+        judged = [r for r in self.replicas if not r.ejected and len(r.stats) >= o.min_requests]
+        if len(judged) < o.min_replicas:
+            return []
+        budget = math.floor(len(self.replicas) * o.max_ejection_ratio) - sum(
+            1 for r in self.replicas if r.ejected
+        )
+        errors = {r.url: r.error_rate for r in judged}
+        latencies = {r.url: r.mean_latency for r in judged}
+        ejected: list[Replica] = []
+        for r in sorted(judged, key=lambda x: (errors[x.url], latencies[x.url]), reverse=True):
+            if budget <= 0:
+                break
+            peer_err = statistics.median(errors[p.url] for p in judged if p is not r)
+            peer_lat = statistics.median(latencies[p.url] for p in judged if p is not r)
+            if errors[r.url] >= o.error_ratio and errors[r.url] >= o.error_factor * peer_err:
+                self.eject(r, reason="errors")
+            elif (
+                latencies[r.url] >= o.min_latency_seconds
+                and latencies[r.url] >= o.latency_factor * peer_lat
+            ):
+                self.eject(r, reason="latency")
+            else:
+                continue
+            ejected.append(r)
+            budget -= 1
+        return ejected
 
     # ---- health -----------------------------------------------------------
 
@@ -410,6 +538,8 @@ class HealthChecker:
         ]
         if jobs:
             await asyncio.gather(*jobs)
+        for pool in self.pools.values():
+            pool.detect_outliers()
 
     async def check_replica(self, pool: UpstreamPool, replica: Replica) -> bool:
         assert self._client is not None
@@ -429,15 +559,18 @@ def build_pools(
     health_cfg: HealthCheckConfig,
     *,
     concurrency_by_upstream: dict[str, ConcurrencyConfig | None] | None = None,
+    outlier_by_upstream: dict[str, OutlierConfig | None] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, UpstreamPool]:
     concurrency_by_upstream = concurrency_by_upstream or {}
+    outlier_by_upstream = outlier_by_upstream or {}
     return {
         name: UpstreamPool(
             cfg,
             breaker_by_upstream.get(name),
             health_cfg,
             concurrency_by_upstream.get(name),
+            outlier_by_upstream.get(name),
             clock=clock,
         )
         for name, cfg in upstreams.items()

@@ -94,6 +94,21 @@ DEADLINE_EXCEEDED = Counter(
     "Requests answered 504 because the end-to-end deadline ran out before a retry could help.",
     ["route"],
 )
+OUTLIER_EJECTIONS = Counter(
+    "failsafe_outlier_ejections_total",
+    "Replicas ejected from rotation, by reason (errors, latency, manual).",
+    ["upstream", "reason"],
+)
+UPSTREAM_EJECTED = Gauge(
+    "failsafe_upstream_ejected",
+    "1 while the replica is ejected from rotation, 0 otherwise.",
+    ["upstream"],
+)
+CANARY_REQUESTS = Counter(
+    "failsafe_canary_requests_total",
+    "Requests routed to the canary subset (canary=true) or to the stable replicas.",
+    ["route", "canary"],
+)
 LOAD_SHED = Counter(
     "failsafe_load_shed_total",
     "Requests answered 503 because every replica was at its concurrency limit.",

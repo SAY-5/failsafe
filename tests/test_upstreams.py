@@ -5,8 +5,9 @@ import httpx
 import pytest
 
 from failsafe.breaker import State
-from failsafe.config import BreakerConfig, HealthCheckConfig, UpstreamConfig
+from failsafe.config import BreakerConfig, HealthCheckConfig, OutlierConfig, UpstreamConfig
 from failsafe.upstreams import HealthChecker, KubernetesEndpoints, UpstreamPool
+from tests.conftest import counter_value
 from tests.fake_upstream import FakeUpstream
 
 
@@ -220,3 +221,143 @@ async def test_kubernetes_api_failure_keeps_replicas():
     await pool.refresh()
     assert [r.url for r in pool.replicas] == ["http://10.9.9.9:9000"]
     await pool.aclose()
+
+
+OUTLIER = OutlierConfig(
+    window=50,
+    min_requests=10,
+    base_ejection_seconds=5.0,
+    max_ejection_seconds=12.0,
+    min_latency_seconds=0.05,
+)
+
+
+def make_outlier_pool(n: int = 3, outlier: OutlierConfig = OUTLIER):
+    cfg = UpstreamConfig("svc", replicas=tuple(f"http://o{i}:80" for i in range(n)))
+    pool = UpstreamPool(
+        cfg,
+        BreakerConfig(consecutive_failures=1000, min_requests=1000),
+        HealthCheckConfig(),
+        None,
+        outlier,
+        clock=FakeClock(),
+    )
+    for r in pool.replicas:
+        pool._set_health(r, True)
+    return pool
+
+
+def feed(pool, replica, n: int, *, error_every: int = 0, latency: float = 0.01) -> None:
+    for i in range(n):
+        if error_every and i % error_every == 0:
+            pool.report_failure(replica, connection_failed=False, latency=latency)
+        else:
+            pool.report_success(replica, latency)
+
+
+def test_error_rate_outlier_is_ejected_then_readmitted_after_cooldown():
+    pool = make_outlier_pool(3)
+    r0, r1, r2 = pool.replicas
+    feed(pool, r0, 20, error_every=2)
+    feed(pool, r1, 20)
+    feed(pool, r2, 20)
+    before = counter_value("failsafe_outlier_ejections_total", upstream=r0.label, reason="errors")
+    assert pool.detect_outliers() == [r0]
+    assert r0.ejected and not r0.available and r0.healthy
+    assert (
+        counter_value("failsafe_outlier_ejections_total", upstream=r0.label, reason="errors")
+        == before + 1
+    )
+    assert {pool.pick().url for _ in range(6)} == {r1.url, r2.url}
+    assert pool.available_count() == 2
+    pool.clock.t += 4.9
+    assert pool.detect_outliers() == [] and r0.ejected
+    pool.clock.t += 0.1
+    pool.detect_outliers()
+    assert not r0.ejected and r0.available
+    assert r0.url in {pool.pick().url for _ in range(3)}
+
+
+def test_latency_outlier_is_ejected_but_small_absolute_latency_is_not():
+    pool = make_outlier_pool(3)
+    r0, r1, r2 = pool.replicas
+    feed(pool, r0, 20, latency=0.03)  # 6x its peers, but under the 50 ms floor
+    feed(pool, r1, 20, latency=0.005)
+    feed(pool, r2, 20, latency=0.005)
+    assert pool.detect_outliers() == []
+    feed(pool, r0, 50, latency=0.3)
+    assert pool.detect_outliers() == [r0]
+    assert (
+        counter_value("failsafe_outlier_ejections_total", upstream=r0.label, reason="latency") >= 1
+    )
+
+
+def test_service_wide_failure_ejects_nobody():
+    pool = make_outlier_pool(3)
+    for r in pool.replicas:
+        feed(pool, r, 20, error_every=2)
+    assert pool.detect_outliers() == []
+    assert pool.available_count() == 3
+
+
+def test_needs_peers_with_enough_samples():
+    pool = make_outlier_pool(1)
+    feed(pool, pool.replicas[0], 20, error_every=1)
+    assert pool.detect_outliers() == []
+    pool = make_outlier_pool(2)
+    r0, r1 = pool.replicas
+    feed(pool, r0, 20, error_every=1)
+    feed(pool, r1, 5)  # below min_requests: r0 has no peer to be compared with
+    assert pool.detect_outliers() == []
+    feed(pool, r1, 5)
+    assert pool.detect_outliers() == [r0]
+
+
+def test_ejection_budget_keeps_most_of_the_pool_in_rotation():
+    pool = make_outlier_pool(3)
+    r0, r1, r2 = pool.replicas
+    feed(pool, r0, 20, error_every=2)
+    feed(pool, r1, 20, error_every=5)  # 20%: would be ejected on its own against r2
+    feed(pool, r2, 20)
+    assert pool.detect_outliers() == [r0]  # worst first, then the 50% budget is spent
+    assert not r1.ejected
+    assert pool.detect_outliers() == []
+
+
+def test_repeated_ejections_escalate_the_cooldown_up_to_the_cap():
+    pool = make_outlier_pool(2)
+    r0, r1 = pool.replicas
+    feed(pool, r1, 20)
+    for expected in (5.0, 10.0, 12.0):
+        feed(pool, r0, 20, error_every=1)
+        assert pool.detect_outliers() == [r0]
+        assert r0.ejected_until - pool.clock.t == pytest.approx(expected)
+        pool.clock.t = r0.ejected_until
+        pool.detect_outliers()
+        assert not r0.ejected
+        feed(pool, r1, 20)
+
+
+def test_manual_eject_and_readmit():
+    pool = make_pool(2)
+    r0, r1 = pool.replicas
+    pool.eject(r0, 60.0)
+    assert r0.ejected and pool.pick() is r1 and pool.pick() is r1
+    pool.readmit(r0)
+    assert not r0.ejected and r0.available
+    assert r0.url in {pool.pick().url for _ in range(2)}
+
+
+def test_prefer_picks_the_subset_first_and_falls_back_to_the_rest():
+    pool = make_pool(3)
+    r0, r1, r2 = pool.replicas
+    canary = pool.resolve(["r2:80"])
+    assert canary == {r2.url}
+    assert [pool.pick(prefer=canary) for _ in range(3)] == [r2, r2, r2]
+    assert {pool.pick(prefer=pool.resolve([r0.url, r1.url])).url for _ in range(4)} == {
+        r0.url,
+        r1.url,
+    }
+    pool.observe_check(r2, False)
+    assert pool.pick(prefer=canary) in (r0, r1)
+    assert pool.pick(prefer=canary, exclude={r0.url, r1.url}) is None
