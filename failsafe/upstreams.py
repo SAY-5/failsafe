@@ -18,7 +18,8 @@ import httpx
 
 from failsafe import metrics
 from failsafe.breaker import CircuitBreaker, State
-from failsafe.config import BreakerConfig, HealthCheckConfig, UpstreamConfig
+from failsafe.concurrency import AdaptiveLimiter
+from failsafe.config import BreakerConfig, ConcurrencyConfig, HealthCheckConfig, UpstreamConfig
 
 log = logging.getLogger("failsafe.upstreams")
 
@@ -106,6 +107,7 @@ class KubernetesEndpoints:
 class Replica:
     url: str
     breaker: CircuitBreaker
+    limiter: AdaptiveLimiter | None = None
     healthy: bool = False
     consecutive_ok: int = 0
     consecutive_fail: int = 0
@@ -117,10 +119,16 @@ class Replica:
         self.label = parts.netloc or self.url
         metrics.UPSTREAM_HEALTHY.labels(upstream=self.label).set(int(self.healthy))
         metrics.set_breaker_state(self.label, self.breaker.state)
+        if self.limiter is not None:
+            metrics.set_concurrency(self.label, self.limiter.limit, self.limiter.inflight)
 
     @property
     def available(self) -> bool:
         return self.healthy and self.breaker.state is not State.OPEN
+
+    @property
+    def has_capacity(self) -> bool:
+        return self.limiter is None or self.limiter.has_capacity()
 
 
 class UpstreamPool:
@@ -131,6 +139,7 @@ class UpstreamPool:
         cfg: UpstreamConfig,
         breaker_cfg: BreakerConfig | None = None,
         health_cfg: HealthCheckConfig | None = None,
+        concurrency_cfg: ConcurrencyConfig | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -138,6 +147,7 @@ class UpstreamPool:
         self.name = cfg.name
         self.breaker_cfg = breaker_cfg or BreakerConfig()
         self.health_cfg = health_cfg or HealthCheckConfig()
+        self.concurrency_cfg = concurrency_cfg
         self.clock = clock
         self._replicas: dict[str, Replica] = {}
         self._rr = 0
@@ -165,9 +175,29 @@ class UpstreamPool:
             on_transition=lambda cb, old, new: metrics.record_transition(cb.name, old, new),
         )
 
+    def _make_limiter(self, label: str) -> AdaptiveLimiter | None:
+        c = self.concurrency_cfg
+        if c is None:
+            return None
+        return AdaptiveLimiter(
+            label,
+            initial=c.initial,
+            min_limit=c.min_limit,
+            max_limit=c.max_limit,
+            backoff_ratio=c.backoff_ratio,
+            rtt_tolerance=c.rtt_tolerance,
+            probe_interval=c.probe_interval,
+            on_update=lambda lim: metrics.set_concurrency(lim.name, lim.limit, lim.inflight),
+        )
+
     def _add(self, url: str, healthy: bool = False) -> Replica:
         label = urlsplit(url).netloc or url
-        r = Replica(url=url, breaker=self._make_breaker(label), healthy=healthy)
+        r = Replica(
+            url=url,
+            breaker=self._make_breaker(label),
+            limiter=self._make_limiter(label),
+            healthy=healthy,
+        )
         self._replicas[url] = r
         return r
 
@@ -192,29 +222,50 @@ class UpstreamPool:
     # ---- selection --------------------------------------------------------
 
     def pick(self, exclude: frozenset[str] | set[str] = frozenset()) -> Replica | None:
-        """Round-robin over healthy replicas whose breaker admits the call.
+        """Round-robin over healthy replicas with spare concurrency whose breaker admits the call.
 
         `breaker.allow()` is only invoked on the replica actually returned, so a
-        half-open breaker's probe budget is consumed by real attempts only.
+        half-open breaker's probe budget is consumed by real attempts only. The
+        returned replica has one limiter slot acquired; `report_success` or
+        `report_failure` releases it.
         """
         reps = self.replicas
         n = len(reps)
         for i in range(n):
             r = reps[(self._rr + i) % n]
-            if r.url in exclude or not r.healthy:
+            if r.url in exclude or not r.healthy or not r.has_capacity:
                 continue
             if r.breaker.allow():
+                if r.limiter is not None:
+                    r.limiter.acquire()
                 self._rr = (self._rr + i + 1) % n
                 return r
         return None
 
+    def saturated(self, exclude: frozenset[str] | set[str] = frozenset()) -> bool:
+        """True when a replica could serve the call but its concurrency limit is full."""
+        return any(
+            r.url not in exclude and r.available and not r.has_capacity for r in self.replicas
+        )
+
+    def retry_after(self) -> float:
+        waits = [r.limiter.retry_after() for r in self.replicas if r.limiter is not None]
+        return min(waits) if waits else 1.0
+
     # ---- passive signals from the proxy ------------------------------------
 
-    def report_success(self, replica: Replica) -> None:
+    def report_success(self, replica: Replica, latency: float | None = None) -> None:
         replica.breaker.record_success()
+        if replica.limiter is not None:
+            replica.limiter.release(latency)
 
-    def report_failure(self, replica: Replica, *, connection_failed: bool) -> None:
+    def report_failure(
+        self, replica: Replica, *, connection_failed: bool, latency: float | None = None
+    ) -> None:
         replica.breaker.record_failure()
+        if replica.limiter is not None:
+            # A refused connection says nothing about load; anything later is backpressure.
+            replica.limiter.release(None, dropped=not connection_failed)
         if connection_failed and replica.healthy:
             self._set_health(replica, False)
 
@@ -371,9 +422,17 @@ def build_pools(
     breaker_by_upstream: dict[str, BreakerConfig],
     health_cfg: HealthCheckConfig,
     *,
+    concurrency_by_upstream: dict[str, ConcurrencyConfig | None] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, UpstreamPool]:
+    concurrency_by_upstream = concurrency_by_upstream or {}
     return {
-        name: UpstreamPool(cfg, breaker_by_upstream.get(name), health_cfg, clock=clock)
+        name: UpstreamPool(
+            cfg,
+            breaker_by_upstream.get(name),
+            health_cfg,
+            concurrency_by_upstream.get(name),
+            clock=clock,
+        )
         for name, cfg in upstreams.items()
     }

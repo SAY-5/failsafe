@@ -64,6 +64,21 @@ INFLIGHT = Gauge(
     "Requests currently being proxied.",
     ["route"],
 )
+CONCURRENCY_LIMIT = Gauge(
+    "failsafe_concurrency_limit",
+    "Adaptive in-flight limit currently granted to the replica.",
+    ["upstream"],
+)
+CONCURRENCY_INFLIGHT = Gauge(
+    "failsafe_concurrency_inflight",
+    "Calls currently in flight to the replica, as counted by its limiter.",
+    ["upstream"],
+)
+LOAD_SHED = Counter(
+    "failsafe_load_shed_total",
+    "Requests answered 503 because every replica was at its concurrency limit.",
+    ["route"],
+)
 
 _STATE_VALUE = {State.CLOSED: 0, State.HALF_OPEN: 1, State.OPEN: 2}
 
@@ -75,6 +90,11 @@ def set_breaker_state(upstream: str, state: State) -> None:
 def record_transition(upstream: str, old: State, new: State) -> None:
     BREAKER_TRANSITIONS.labels(upstream=upstream, from_state=old.value, to_state=new.value).inc()
     set_breaker_state(upstream, new)
+
+
+def set_concurrency(upstream: str, limit: int, inflight: int) -> None:
+    CONCURRENCY_LIMIT.labels(upstream=upstream).set(limit)
+    CONCURRENCY_INFLIGHT.labels(upstream=upstream).set(inflight)
 
 
 def render() -> tuple[bytes, str]:
