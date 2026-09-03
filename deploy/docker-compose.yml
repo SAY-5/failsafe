@@ -4,7 +4,8 @@ x-upstream: &upstream
   image: failsafe:dev
   build:
     context: ..
-  command: ["python", "-m", "example_upstream", "--port", "9000"]
+  entrypoint: ["python", "-m", "example_upstream"]
+  command: ["--port", "9000"]
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=1).status == 200 else 1)"]
     interval: 3s
