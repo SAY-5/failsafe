@@ -260,6 +260,11 @@ class UpstreamPool:
         if replica.limiter is not None:
             replica.limiter.release(latency)
 
+    def report_cancelled(self, replica: Replica) -> None:
+        """An attempt was abandoned (hedge lost): free the slot, record no outcome."""
+        if replica.limiter is not None:
+            replica.limiter.release(None)
+
     def report_failure(
         self, replica: Replica, *, connection_failed: bool, latency: float | None = None
     ) -> None:

@@ -74,6 +74,26 @@ CONCURRENCY_INFLIGHT = Gauge(
     "Calls currently in flight to the replica, as counted by its limiter.",
     ["upstream"],
 )
+HEDGES = Counter(
+    "failsafe_hedges_total",
+    "Hedge attempts fired because the first attempt exceeded the hedge delay.",
+    ["route"],
+)
+HEDGE_WINS = Counter(
+    "failsafe_hedge_wins_total",
+    "Requests whose response came from the hedge attempt rather than the first one.",
+    ["route"],
+)
+HEDGE_DELAY = Gauge(
+    "failsafe_hedge_delay_seconds",
+    "Delay after which a hedge is fired on the route (observed latency percentile).",
+    ["route"],
+)
+DEADLINE_EXCEEDED = Counter(
+    "failsafe_deadline_exceeded_total",
+    "Requests answered 504 because the end-to-end deadline ran out before a retry could help.",
+    ["route"],
+)
 LOAD_SHED = Counter(
     "failsafe_load_shed_total",
     "Requests answered 503 because every replica was at its concurrency limit.",
