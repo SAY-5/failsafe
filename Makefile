@@ -4,7 +4,7 @@ UV ?= uv
 .PHONY: setup lint fmt test image chaos demo k8s-chaos clean
 
 setup:
-	$(UV) venv --python 3.12 .venv
+	$(UV) venv --clear --python 3.12 .venv
 	$(UV) pip install --python .venv/bin/python -e ".[dev]"
 
 lint:
