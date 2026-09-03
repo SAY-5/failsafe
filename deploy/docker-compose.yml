@@ -1,0 +1,60 @@
+name: failsafe
+
+x-upstream: &upstream
+  image: failsafe:dev
+  build:
+    context: ..
+  command: ["python", "-m", "example_upstream", "--port", "9000"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=1).status == 200 else 1)"]
+    interval: 3s
+    timeout: 2s
+    retries: 3
+  restart: "no"
+
+services:
+  gateway:
+    image: failsafe:dev
+    build:
+      context: ..
+    ports:
+      - "8080:8080"
+    environment:
+      FAILSAFE_CONFIG: /app/failsafe/routes.yaml
+    depends_on:
+      upstream-1: { condition: service_healthy }
+      upstream-2: { condition: service_healthy }
+      upstream-3: { condition: service_healthy }
+
+  upstream-1:
+    <<: *upstream
+    environment: { UPSTREAM_NAME: upstream-1 }
+  upstream-2:
+    <<: *upstream
+    environment: { UPSTREAM_NAME: upstream-2 }
+  upstream-3:
+    <<: *upstream
+    environment: { UPSTREAM_NAME: upstream-3 }
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2h"]
+    profiles: ["observability"]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    profiles: ["observability"]

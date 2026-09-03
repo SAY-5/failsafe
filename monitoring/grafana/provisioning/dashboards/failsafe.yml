@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: failsafe
+    folder: FailSafe
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
