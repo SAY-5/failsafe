@@ -24,8 +24,8 @@ class AdaptiveLimiter:
     * `release(rtt, dropped=...)` frees the slot and feeds the sample back:
         - `dropped` (timeout, reset, 5xx): `limit *= backoff_ratio`
         - `rtt > no_load_rtt * rtt_tolerance`: same multiplicative decrease
-        - otherwise, when at least half of the limit was in use, `limit += 1 / limit`
-          so the limit grows by one for every `limit` good calls at load
+        - otherwise, when at least half of the limit was in use, one credit is
+          earned; `limit` credits raise the limit by one (additive increase)
     * `no_load_rtt` is the smallest RTT seen since the last probe; every
       `probe_interval` samples it is reset to the current sample so a service
       that became permanently slower is not punished forever.
@@ -62,6 +62,7 @@ class AdaptiveLimiter:
         self.on_update = on_update
 
         self._limit = float(initial)
+        self._credits = 0
         self._inflight = 0
         self._no_load_rtt: float | None = None
         self._samples = 0
@@ -120,9 +121,13 @@ class AdaptiveLimiter:
         if rtt > self._no_load_rtt * self.rtt_tolerance:
             self._decrease()
         elif inflight * 2 >= int(self._limit):
-            self._limit = min(float(self.max_limit), self._limit + 1.0 / self._limit)
+            self._credits += 1
+            if self._credits >= int(self._limit):
+                self._credits = 0
+                self._limit = min(float(self.max_limit), self._limit + 1.0)
 
     def _decrease(self) -> None:
+        self._credits = 0
         self._limit = max(float(self.min_limit), math.floor(self._limit * self.backoff_ratio))
 
     def _notify(self) -> None:
