@@ -94,6 +94,8 @@ class FakeUpstream:
                         "path": path,
                         "body": body.decode(errors="replace"),
                         "idempotency_key": headers.get("idempotency-key"),
+                        "deadline": headers.get("x-request-deadline"),
+                        "timeout": headers.get("x-request-timeout"),
                     },
                 )
                 await writer.drain()

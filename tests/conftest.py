@@ -30,6 +30,8 @@ def gateway_config(
     retry: dict | None = None,
     breaker: dict | None = None,
     concurrency: dict | None = None,
+    hedge: dict | None = None,
+    deadline: float | None = None,
     timeout: float = 0.5,
     interval: float = 0.05,
 ) -> dict:
@@ -42,6 +44,8 @@ def gateway_config(
         "breaker": breaker
         or {"consecutive_failures": 3, "min_requests": 5, "open_seconds": 0.5, "half_open_max": 1},
         "concurrency": concurrency,
+        "hedge": hedge,
+        "deadline_seconds": deadline,
     }
     return {
         "health_check": {"interval_seconds": interval, "timeout_seconds": 0.3},
