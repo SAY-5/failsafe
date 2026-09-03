@@ -84,6 +84,28 @@ def test_hedge_and_deadline_are_optional_and_validated():
         from_dict(base(deadline_seconds=0))
 
 
+def test_canary_and_outlier_are_optional_and_validated():
+    r = from_dict(base()).routes[0]
+    assert r.canary is None and r.outlier is None
+    r = from_dict(
+        base(canary={"replicas": ["http://b:1"], "weight": 0.25, "header": "X-Canary"}, outlier={})
+    ).routes[0]
+    assert r.canary.replicas == ("http://b:1",) and r.canary.weight == 0.25
+    assert r.canary.header == "X-Canary"
+    assert r.outlier.window == 100 and r.outlier.base_ejection_seconds == 30.0
+    assert from_dict(base(canary={"replicas": "b:1"})).routes[0].canary.replicas == ("b:1",)
+    with pytest.raises(ValueError):
+        from_dict(base(canary={"replicas": []}))
+    with pytest.raises(ValueError):
+        from_dict(base(canary={"replicas": ["b:1"], "weight": 1.5}))
+    with pytest.raises(ValueError):
+        from_dict(base(outlier={"min_requests": 500}))
+    with pytest.raises(ValueError):
+        from_dict(base(outlier={"max_ejection_ratio": 0}))
+    with pytest.raises(ValueError):
+        from_dict(base(outlier={"base_ejection_seconds": 10, "max_ejection_seconds": 5}))
+
+
 def test_env_expansion_and_dns_upstream(monkeypatch):
     monkeypatch.setenv("SVC_HOST", "svc.ns.svc.cluster.local")
     cfg = from_dict(

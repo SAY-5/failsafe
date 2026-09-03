@@ -101,6 +101,52 @@ class HedgeConfig:
 
 
 @dataclass(frozen=True)
+class CanaryConfig:
+    """Send a weighted share of a route's traffic to a subset of replicas."""
+
+    replicas: tuple[str, ...]  # replica URLs or host:port labels
+    weight: float = 0.1  # share of requests routed to the canary subset
+    header: str | None = None  # request header that forces canary (1/true) or stable (0/false)
+
+    def __post_init__(self) -> None:
+        if not self.replicas:
+            raise ValueError("canary.replicas must list at least one replica")
+        if not 0 <= self.weight <= 1:
+            raise ValueError("canary.weight must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class OutlierConfig:
+    """Eject a replica whose error rate or latency stands out from its peers."""
+
+    window: int = 100  # recent outcomes kept per replica
+    min_requests: int = 20  # samples a replica needs before it is judged
+    min_replicas: int = 2  # replicas with enough samples needed to have peers
+    error_ratio: float = 0.2  # error rate a replica must reach to be ejected
+    error_factor: float = 3.0  # and exceed this multiple of the peers' median error rate
+    latency_factor: float = 3.0  # mean latency above this multiple of the peers' median
+    min_latency_seconds: float = 0.05  # and above this floor, so noise is never an outlier
+    max_ejection_ratio: float = 0.5  # never eject more than this share of the pool
+    base_ejection_seconds: float = 30.0  # cool-down, multiplied by the ejection count
+    max_ejection_seconds: float = 300.0
+
+    def __post_init__(self) -> None:
+        if self.window < 1 or self.min_requests < 1 or self.min_replicas < 2:
+            raise ValueError("outlier window and min_requests must be >= 1, min_replicas >= 2")
+        if self.min_requests > self.window:
+            raise ValueError("outlier.min_requests must be <= window")
+        if not 0 < self.error_ratio <= 1 or self.error_factor < 1 or self.latency_factor < 1:
+            raise ValueError("outlier ratios must satisfy 0 < error_ratio <= 1, factors >= 1")
+        if not 0 < self.max_ejection_ratio <= 1:
+            raise ValueError("outlier.max_ejection_ratio must be in (0, 1]")
+        if (
+            self.base_ejection_seconds <= 0
+            or self.max_ejection_seconds < self.base_ejection_seconds
+        ):
+            raise ValueError("outlier ejection seconds must satisfy 0 < base <= max")
+
+
+@dataclass(frozen=True)
 class HealthCheckConfig:
     interval_seconds: float = 2.0
     timeout_seconds: float = 1.0
@@ -137,6 +183,8 @@ class RouteConfig:
     concurrency: ConcurrencyConfig | None = None
     hedge: HedgeConfig | None = None
     deadline_seconds: float | None = None  # default end-to-end budget per request
+    canary: CanaryConfig | None = None
+    outlier: OutlierConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.prefix.startswith("/"):
@@ -204,6 +252,8 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
         cc = r.get("concurrency")
         hd = r.get("hedge")
         dl = r.get("deadline_seconds")
+        cn = r.get("canary")
+        ol = r.get("outlier")
         routes.append(
             RouteConfig(
                 prefix=r["prefix"],
@@ -217,6 +267,8 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
                 concurrency=None if cc is None else ConcurrencyConfig(**cc),
                 hedge=None if hd is None else HedgeConfig(**hd),
                 deadline_seconds=None if dl is None else float(dl),
+                canary=None if cn is None else CanaryConfig(**_tuplify(cn, "replicas")),
+                outlier=None if ol is None else OutlierConfig(**ol),
             )
         )
 
@@ -231,7 +283,8 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
 
 def _tuplify(d: dict[str, Any], key: str) -> dict[str, Any]:
     if key in d:
-        d = {**d, key: tuple(int(s) for s in d[key])}
+        values = d[key] if isinstance(d[key], list | tuple) else [d[key]]
+        d = {**d, key: tuple(int(v) if isinstance(v, int) else str(v) for v in values)}
     return d
 
 
