@@ -8,6 +8,8 @@ client ──> route match ──> token bucket ──> forward (retry + failove
                               │                 │
                               429               ├── breaker per replica
                                                 ├── concurrency limit per replica (503 when all full)
+                                                ├── hedge after p95 on another replica
+                                                ├── deadline budget (504 when exhausted)
                                                 ├── health state per replica
                                                 └── Prometheus counters
 ```
@@ -115,6 +117,37 @@ If every replica has been tried and attempts remain, the pool is consulted
 again without exclusions so a single-replica upstream still gets its retries.
 When nothing is available the gateway returns `503` and increments
 `failsafe_client_failed_requests_total`, the counter the chaos runs assert on.
+
+## Hedged requests (`hedge.py`, `proxy.py`)
+
+Tail latency is usually one slow replica, not a slow service. For idempotent
+requests the forwarder runs the first attempt as a task and waits for the
+route's hedge delay; if the attempt is still running it picks another replica
+(one with a free concurrency slot that has not been tried) and starts a second
+attempt. Whichever returns a non-retryable response first wins, the other
+task is cancelled, and the cancelled attempt only frees its limiter slot: its
+outcome is unknown, so the breaker is not told anything. If both fail the
+request falls into the ordinary retry loop with two attempts spent. At most
+one hedge is fired per request.
+
+The delay comes from a `LatencyTracker` per route, a sliding window of
+successful attempt latencies with a cached nearest-rank percentile. Until
+`min_samples` have been seen no hedge fires; a percentile that is not below
+the attempt timeout also disables hedging, since the hedge would never start
+before the first attempt gave up. `hedge.after_ms` replaces the percentile
+with a fixed delay.
+
+## Deadlines (`proxy.py`)
+
+`X-Request-Timeout` (seconds) or `X-Request-Deadline` (epoch seconds) from
+the client, and `deadline_seconds` from the route, are combined into one
+monotonic deadline per request; the tightest wins and a malformed header is a
+`400`. Each attempt's total timeout is clamped to the remaining budget and
+the upstream receives both headers rewritten with what is left, so a chain of
+services shares one budget instead of multiplying timeouts. Before a retry the
+forwarder checks that the backoff would end before the deadline; otherwise it
+stops and answers `504 deadline exceeded`, which is counted in
+`failsafe_deadline_exceeded_total` and in the client-failed counter.
 
 ## Upstream pool and health checks (`upstreams.py`)
 

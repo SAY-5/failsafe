@@ -13,6 +13,12 @@ rate limited, timing out, crashing or being killed outright.
 * **Adaptive concurrency limits** per replica (AIMD driven by observed
   latency) that steer requests away from a saturated replica and shed with
   `503` + `Retry-After` only when every replica is full.
+* **Hedged reads**: an idempotent request that is slower than the route's
+  observed p95 gets a second attempt on another replica; the first answer
+  wins and the loser is cancelled.
+* **End-to-end deadlines**: `X-Request-Timeout` / `X-Request-Deadline` (or a
+  route default) bound the whole request, are propagated to upstreams with
+  the remaining budget, and stop retries that could not finish in time.
 * **Active health checks** plus replica discovery from the Kubernetes
   EndpointSlice API (or headless DNS).
 * **Prometheus metrics** for every decision the gateway makes, with a
@@ -55,7 +61,7 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 75 tests, including an in-process failover test
+make lint test  # ruff + 88 tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
 
@@ -209,13 +215,27 @@ routes:
       rtt_tolerance: 2.5       # spike = window average above no-load RTT x tolerance
       window: 10               # samples per adjustment
       probe_interval: 200      # samples between no-load RTT re-estimates
+    hedge:                     # omit to disable hedged reads
+      percentile: 95           # fire a second attempt once the first exceeds p95
+      min_samples: 50          # samples needed before the percentile is trusted
+      # after_ms: 25           # fixed delay instead of the percentile
+    # deadline_seconds: 5.0    # default end-to-end budget per request
 ```
 
 Retry rules: GET, HEAD, PUT, DELETE and OPTIONS are retried on connection
 errors, timeouts, dropped connections and the listed statuses. POST and PATCH
 are only retried after connection errors (nothing reached the upstream),
 unless the route sets `idempotent_post` or the request carries an
-`Idempotency-Key` header.
+`Idempotency-Key` header. The same idempotency rule decides whether a request
+may be hedged.
+
+Deadlines: a client sends `X-Request-Timeout: 1.5` (seconds of budget) or
+`X-Request-Deadline: 1725300000.250` (Unix epoch seconds); the tighter of the
+two and the route's `deadline_seconds` wins. Every attempt's timeout is
+clamped to the remaining budget, both headers are rewritten with the
+remaining budget before the request reaches the upstream, and a retry whose
+backoff would end past the deadline is not started: the client gets `504`
+with `deadline exceeded`, counted in `failsafe_deadline_exceeded_total`.
 
 ## Endpoints
 
@@ -249,6 +269,10 @@ no-load latency; a replica that is merely slow is skipped, not shed.
 | `failsafe_concurrency_limit` | upstream | adaptive in-flight limit currently granted to the replica |
 | `failsafe_concurrency_inflight` | upstream | calls in flight to the replica as counted by its limiter |
 | `failsafe_load_shed_total` | route | requests answered 503 because every replica was at its limit |
+| `failsafe_hedges_total` | route | hedge attempts fired |
+| `failsafe_hedge_wins_total` | route | requests answered by the hedge rather than the first attempt |
+| `failsafe_hedge_delay_seconds` | route | current hedge delay (observed latency percentile) |
+| `failsafe_deadline_exceeded_total` | route | requests answered 504 because the deadline ran out |
 
 The Grafana dashboard in `monitoring/grafana/dashboards/failsafe.json` shows
 RPS by status, latency percentiles, rate limiting, retries and failovers,
@@ -257,8 +281,8 @@ breaker state, upstream health and the client-failed counter.
 ## Layout
 
 ```
-failsafe/           gateway package (config, ratelimit, breaker, concurrency, retry,
-                    upstreams, proxy, app)
+failsafe/           gateway package (config, ratelimit, breaker, concurrency, hedge,
+                    retry, upstreams, proxy, app)
 example_upstream/   orders service with env and runtime failure injection
 chaos/              load generator (run.py) and kill script (kill.sh)
 scripts/            compose-chaos.sh, k8s-chaos.sh
@@ -268,6 +292,20 @@ tests/              pytest suite
 ```
 
 ## Releases
+
+### v3.0.0: request hedging and deadline propagation
+
+Idempotent requests are hedged: once the first attempt has run longer than
+the route's observed latency percentile (`hedge.percentile`, or a fixed
+`hedge.after_ms`), a second attempt starts on another replica with a free
+slot, the first successful answer is relayed and the loser is cancelled
+without touching its breaker. Clients can bound a request end to end with
+`X-Request-Timeout` or `X-Request-Deadline`; routes can set a default
+`deadline_seconds`. The budget clamps every attempt timeout, is forwarded to
+upstreams as both headers, and stops retries that would finish late. New
+metrics: `failsafe_hedges_total`, `failsafe_hedge_wins_total`,
+`failsafe_hedge_delay_seconds`, `failsafe_deadline_exceeded_total`. 13 new
+tests (88 total).
 
 ### v2.0.0: adaptive concurrency limits
 
