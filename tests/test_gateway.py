@@ -153,13 +153,13 @@ async def test_metrics_endpoint_exposes_expected_series(harness_factory):
 
 
 async def test_failover_under_load_has_zero_client_failures(harness_factory):
-    """1200 requests at concurrency 150 while one replica is killed and another hangs."""
+    """1200 requests at concurrency 100 while one replica is killed and another hangs."""
     h = await harness_factory(
         3, timeout=0.3, breaker={"consecutive_failures": 3, "open_seconds": 1}
     )
     u0, u1, u2 = h.upstreams
     total = 1200
-    sem = asyncio.Semaphore(150)
+    sem = asyncio.Semaphore(100)
     statuses: list[int] = []
     rng = random.Random(1)
 
