@@ -119,6 +119,40 @@ upstream pod at random intervals for the whole run. It exits non-zero unless
 `client_failed_requests` is 0. Set `KEEP_CLUSTER=1` to inspect the cluster
 afterwards and `SKIP_BUILD=1` to reuse an existing `failsafe:dev` image.
 
+Result on a fresh kind cluster (Docker Desktop VM with 2 CPUs, so the run used
+`RPS=60`; the pod kills are the point, not the throughput):
+
+```
+================================================================
+FailSafe chaos summary
+================================================================
+target                        http://gateway:8080
+duration / target rps         45.0s / 60.0 rps (achieved 60.0 rps)
+total requests                2701
+successful (2xx)              2701
+rate limited (429)            0
+client-visible failed         0   <- must be 0 (gateway counter: 0)
+retries (gateway)             4  {'connect': 4}
+failovers (gateway)           4
+breaker transitions           0  {}
+latency ms p50 / p95 / p99    3.3 / 8.5 / 14.4  (max 38.9)
+================================================================
+kill timeline (UTC):
+  06:44:17	kill	upstream-77d888f65c-h2trr
+  06:44:29	kill	upstream-77d888f65c-5f9js
+  06:44:43	kill	upstream-77d888f65c-88q6f
+  06:44:57	kill	upstream-77d888f65c-rczvw
+k8s chaos: pods killed=4 client-visible failed requests=0
+PASS: zero client-visible failures across 4 pod kills
+```
+
+Each kill produced exactly one connect-phase retry: the request in flight to
+the deleted pod moved to a live replica and the client got its 200. Replicas
+are discovered from the EndpointSlice API, so the replacement pod entered
+rotation as soon as its readiness probe passed; the first run of this script
+used headless DNS and showed why that is not good enough (see
+`ARCHITECTURE.md`).
+
 ## Configuration
 
 The gateway reads `routes.yaml` (path from `--config` or `$FAILSAFE_CONFIG`).
