@@ -51,6 +51,22 @@ def test_unknown_upstream_and_bad_values_rejected():
         from_dict(base(breaker={"failure_ratio": 2}))
 
 
+def test_concurrency_is_optional_and_validated():
+    assert from_dict(base()).routes[0].concurrency is None
+    cfg = from_dict(base(concurrency={"initial": 5, "min_limit": 1, "max_limit": 50}))
+    c = cfg.routes[0].concurrency
+    assert (c.initial, c.min_limit, c.max_limit) == (5, 1, 50)
+    assert c.backoff_ratio == 0.9 and c.rtt_tolerance == 2.0
+    with pytest.raises(ValueError):
+        from_dict(base(concurrency={"initial": 0}))
+    with pytest.raises(ValueError):
+        from_dict(base(concurrency={"min_limit": 10, "max_limit": 5}))
+    with pytest.raises(ValueError):
+        from_dict(base(concurrency={"backoff_ratio": 1.0}))
+    with pytest.raises(ValueError):
+        from_dict(base(concurrency={"rtt_tolerance": 1.0}))
+
+
 def test_env_expansion_and_dns_upstream(monkeypatch):
     monkeypatch.setenv("SVC_HOST", "svc.ns.svc.cluster.local")
     cfg = from_dict(

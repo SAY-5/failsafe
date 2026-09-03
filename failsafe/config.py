@@ -57,6 +57,30 @@ class BreakerConfig:
 
 
 @dataclass(frozen=True)
+class ConcurrencyConfig:
+    """Adaptive per-replica concurrency limit (AIMD driven by observed latency)."""
+
+    initial: int = 20
+    min_limit: int = 2
+    max_limit: int = 1000
+    backoff_ratio: float = 0.9
+    rtt_tolerance: float = 2.0
+    probe_interval: int = 200
+
+    def __post_init__(self) -> None:
+        if self.min_limit < 1 or self.max_limit < self.min_limit:
+            raise ValueError("concurrency limits must satisfy 1 <= min_limit <= max_limit")
+        if not self.min_limit <= self.initial <= self.max_limit:
+            raise ValueError("concurrency.initial must be within [min_limit, max_limit]")
+        if not 0 < self.backoff_ratio < 1:
+            raise ValueError("concurrency.backoff_ratio must be in (0, 1)")
+        if self.rtt_tolerance <= 1:
+            raise ValueError("concurrency.rtt_tolerance must be > 1")
+        if self.probe_interval < 1:
+            raise ValueError("concurrency.probe_interval must be >= 1")
+
+
+@dataclass(frozen=True)
 class HealthCheckConfig:
     interval_seconds: float = 2.0
     timeout_seconds: float = 1.0
@@ -90,6 +114,7 @@ class RouteConfig:
     rate_limit: RateLimitConfig | None = field(default_factory=RateLimitConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
     breaker: BreakerConfig = field(default_factory=BreakerConfig)
+    concurrency: ConcurrencyConfig | None = None
 
     def __post_init__(self) -> None:
         if not self.prefix.startswith("/"):
@@ -152,6 +177,7 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
     routes: list[RouteConfig] = []
     for r in raw.get("routes") or []:
         rl = r.get("rate_limit", {})
+        cc = r.get("concurrency")
         routes.append(
             RouteConfig(
                 prefix=r["prefix"],
@@ -162,6 +188,7 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
                 rate_limit=None if rl is None else RateLimitConfig(**rl),
                 retry=RetryConfig(**_tuplify(r.get("retry", {}), "retry_on_status")),
                 breaker=BreakerConfig(**r.get("breaker", {})),
+                concurrency=None if cc is None else ConcurrencyConfig(**cc),
             )
         )
 
