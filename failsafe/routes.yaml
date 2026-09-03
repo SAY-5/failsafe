@@ -1,0 +1,40 @@
+# FailSafe gateway configuration.
+# Environment variables are expanded in string values (e.g. ${UPSTREAM_HOST}).
+
+health_check:
+  interval_seconds: 1.0
+  timeout_seconds: 0.5
+  unhealthy_threshold: 1
+  healthy_threshold: 1
+
+upstreams:
+  orders:
+    # Static replica list (docker compose). For Kubernetes use `dns` + `port`
+    # pointing at a headless Service; every A record becomes a replica.
+    replicas:
+      - http://upstream-1:9000
+      - http://upstream-2:9000
+      - http://upstream-3:9000
+    health_path: /health
+
+routes:
+  - prefix: /orders
+    upstream: orders
+    timeout_seconds: 2.0
+    rate_limit:
+      capacity: 200
+      refill_per_second: 400
+      key_header: X-API-Key
+    retry:
+      max_attempts: 4
+      base_delay_ms: 10
+      max_delay_ms: 150
+      idempotent_post: false
+      retry_on_status: [500, 502, 503, 504]
+    breaker:
+      window: 20
+      failure_ratio: 0.5
+      min_requests: 5
+      consecutive_failures: 3
+      open_seconds: 3.0
+      half_open_max: 2
