@@ -85,7 +85,10 @@ class Forwarder:
             path = path[len(route.prefix.rstrip("/")) :] or "/"
         if request.url.query:
             path = f"{path}?{request.url.query}"
-        timeout = httpx.Timeout(route.timeout_seconds, connect=min(route.timeout_seconds, 1.0))
+        timeout = httpx.Timeout(
+            route.timeout_seconds,
+            connect=min(route.timeout_seconds, route.connect_timeout_seconds),
+        )
 
         tried: set[str] = set()
         prev: Replica | None = None

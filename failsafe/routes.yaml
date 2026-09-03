@@ -21,6 +21,7 @@ routes:
   - prefix: /orders
     upstream: orders
     timeout_seconds: 2.0
+    connect_timeout_seconds: 0.5
     rate_limit:
       capacity: 200
       refill_per_second: 400

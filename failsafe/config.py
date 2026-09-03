@@ -83,6 +83,7 @@ class RouteConfig:
     prefix: str
     upstream: str
     timeout_seconds: float = 2.0
+    connect_timeout_seconds: float = 0.5
     strip_prefix: bool = False
     rate_limit: RateLimitConfig | None = field(default_factory=RateLimitConfig)
     retry: RetryConfig = field(default_factory=RetryConfig)
@@ -91,8 +92,8 @@ class RouteConfig:
     def __post_init__(self) -> None:
         if not self.prefix.startswith("/"):
             raise ValueError(f"route prefix must start with '/': {self.prefix!r}")
-        if self.timeout_seconds <= 0:
-            raise ValueError("route.timeout_seconds must be > 0")
+        if self.timeout_seconds <= 0 or self.connect_timeout_seconds <= 0:
+            raise ValueError("route timeouts must be > 0")
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
                 prefix=r["prefix"],
                 upstream=r["upstream"],
                 timeout_seconds=float(r.get("timeout_seconds", 2.0)),
+                connect_timeout_seconds=float(r.get("connect_timeout_seconds", 0.5)),
                 strip_prefix=bool(r.get("strip_prefix", False)),
                 rate_limit=None if rl is None else RateLimitConfig(**rl),
                 retry=RetryConfig(**_tuplify(r.get("retry", {}), "retry_on_status")),
