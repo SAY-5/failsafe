@@ -56,13 +56,14 @@ export function BreakerSection() {
   const [, setFrame] = useState(0);
   const acc = useRef(0);
 
-  const send = useCallback(() => {
+  const send = useCallback((forceFail?: boolean) => {
+    const fail = forceFail ?? failing;
     if (!breaker.allow()) {
       setFastFails((n) => n + 1);
       push("503 fast-fail, breaker refused the call in 0.02 ms", "fast");
       return;
     }
-    if (failing) {
+    if (fail) {
       breaker.recordFailure();
       setCounts((c) => ({ ...c, fail: c.fail + 1 }));
       push(breaker.state === "half_open" || breaker.state === "open" ? "probe failed: upstream 503" : "upstream 503 recorded", "fail");
@@ -74,7 +75,7 @@ export function BreakerSection() {
   }, [breaker, failing, push]);
 
   const burst = useCallback(() => {
-    for (let i = 0; i < 3; i++) send();
+    for (let i = 0; i < 3; i++) send(true);
   }, [send]);
 
   useTicker((dt) => {
@@ -191,7 +192,7 @@ export function BreakerSection() {
                 </div>
               </div>
               <div className="bucket-actions">
-                <button type="button" className="btn" onClick={send}>
+                <button type="button" className="btn" onClick={() => send()}>
                   Send request
                 </button>
                 <button type="button" className="btn btn--crimson" onClick={() => { setFailing(true); burst(); }}>
