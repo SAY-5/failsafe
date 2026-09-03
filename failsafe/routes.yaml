@@ -39,3 +39,11 @@ routes:
       consecutive_failures: 3
       open_seconds: 3.0
       half_open_max: 2
+    concurrency:               # omit to disable adaptive per-replica limits
+      initial: 32
+      min_limit: 4
+      max_limit: 512
+      backoff_ratio: 0.9
+      rtt_tolerance: 2.5
+      window: 10
+      probe_interval: 200

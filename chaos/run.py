@@ -26,6 +26,7 @@ COUNTERS = {
     "failsafe_breaker_transitions_total": ("to_state",),
     "failsafe_rate_limited_total": (),
     "failsafe_client_failed_requests_total": (),
+    "failsafe_load_shed_total": (),
 }
 
 
@@ -194,6 +195,7 @@ def summarize(args: argparse.Namespace, out: Outcomes, m: dict[str, float]) -> d
             "breaker_transitions": transitions,
             "breaker_transitions_total": sum(transitions.values()),
             "client_failed_counter": int(m.get("failsafe_client_failed_requests_total", 0)),
+            "load_shed": int(m.get("failsafe_load_shed_total", 0)),
         },
         "kills": n_kills,
         "kill_timeline": kills,
@@ -220,6 +222,7 @@ def print_summary(s: dict) -> None:
     )
     print(f"retries (gateway)             {g['retries_total']}  {g['retries']}")
     print(f"failovers (gateway)           {g['failovers']}")
+    print(f"load shed (gateway)           {g['load_shed']}")
     print(
         f"breaker transitions           {g['breaker_transitions_total']}  "
         f"{g['breaker_transitions']}"
