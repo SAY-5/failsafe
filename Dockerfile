@@ -2,7 +2,7 @@
 FROM python:3.12-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.4.30 /uv /bin/uv
 WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+ENV UV_LINK_MODE=copy
 COPY pyproject.toml README.md LICENSE ./
 COPY failsafe ./failsafe
 COPY example_upstream ./example_upstream
