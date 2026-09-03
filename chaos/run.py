@@ -27,6 +27,9 @@ COUNTERS = {
     "failsafe_rate_limited_total": (),
     "failsafe_client_failed_requests_total": (),
     "failsafe_load_shed_total": (),
+    "failsafe_hedges_total": (),
+    "failsafe_hedge_wins_total": (),
+    "failsafe_deadline_exceeded_total": (),
 }
 
 
@@ -196,6 +199,9 @@ def summarize(args: argparse.Namespace, out: Outcomes, m: dict[str, float]) -> d
             "breaker_transitions_total": sum(transitions.values()),
             "client_failed_counter": int(m.get("failsafe_client_failed_requests_total", 0)),
             "load_shed": int(m.get("failsafe_load_shed_total", 0)),
+            "hedges": int(m.get("failsafe_hedges_total", 0)),
+            "hedge_wins": int(m.get("failsafe_hedge_wins_total", 0)),
+            "deadline_exceeded": int(m.get("failsafe_deadline_exceeded_total", 0)),
         },
         "kills": n_kills,
         "kill_timeline": kills,
@@ -223,6 +229,8 @@ def print_summary(s: dict) -> None:
     print(f"retries (gateway)             {g['retries_total']}  {g['retries']}")
     print(f"failovers (gateway)           {g['failovers']}")
     print(f"load shed (gateway)           {g['load_shed']}")
+    print(f"hedges fired / won (gateway)  {g['hedges']} / {g['hedge_wins']}")
+    print(f"deadline exceeded (gateway)   {g['deadline_exceeded']}")
     print(
         f"breaker transitions           {g['breaker_transitions_total']}  "
         f"{g['breaker_transitions']}"
