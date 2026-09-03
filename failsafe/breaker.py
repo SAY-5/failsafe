@@ -46,7 +46,7 @@ class CircuitBreaker:
         on_transition: TransitionHook | None = None,
     ) -> None:
         if window < 1 or min_requests < 1 or half_open_max < 1 or consecutive_failures < 1:
-            raise ValueError("window, min_requests, half_open_max, consecutive_failures must be >= 1")
+            raise ValueError("window, min_requests, half_open_max, consecutive_failures: all >= 1")
         if not 0 < failure_ratio <= 1:
             raise ValueError("failure_ratio must be in (0, 1]")
         self.name = name

@@ -105,16 +105,18 @@ class GatewayConfig:
     def __post_init__(self) -> None:
         for route in self.routes:
             if route.upstream not in self.upstreams:
-                raise ValueError(f"route {route.prefix} references unknown upstream {route.upstream!r}")
+                raise ValueError(
+                    f"route {route.prefix} references unknown upstream {route.upstream!r}"
+                )
 
     def match(self, path: str) -> RouteConfig | None:
         """Longest-prefix match on the request path."""
         best: RouteConfig | None = None
         for route in self.routes:
             p = route.prefix
-            if path == p or path.startswith(p.rstrip("/") + "/") or (p == "/" and path.startswith("/")):
-                if best is None or len(p) > len(best.prefix):
-                    best = route
+            hit = path == p or p == "/" or path.startswith(p.rstrip("/") + "/")
+            if hit and (best is None or len(p) > len(best.prefix)):
+                best = route
         return best
 
 
