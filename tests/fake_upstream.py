@@ -26,6 +26,7 @@ class FakeUpstream:
         self.served = 0
         self.health_hits = 0
         self._server: asyncio.AbstractServer | None = None
+        self._writers: set[asyncio.StreamWriter] = set()
         self.port = 0
 
     @property
@@ -37,16 +38,20 @@ class FakeUpstream:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", self.port))
         self.port = sock.getsockname()[1]
-        self._server = await asyncio.start_server(self._handle, sock=sock)
+        self._server = await asyncio.start_server(self._handle, sock=sock, backlog=2048)
         return self
 
     async def stop(self) -> None:
+        """Stop accepting and abort every open connection, like a SIGKILL would."""
+        for w in list(self._writers):
+            w.transport.abort()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self._writers.add(writer)
         try:
             while True:
                 head = await reader.readuntil(b"\r\n\r\n")
@@ -91,6 +96,7 @@ class FakeUpstream:
         except (asyncio.IncompleteReadError, ConnectionError, asyncio.CancelledError):
             pass
         finally:
+            self._writers.discard(writer)
             writer.close()
 
     @staticmethod
