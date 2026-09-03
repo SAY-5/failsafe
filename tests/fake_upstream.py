@@ -5,6 +5,7 @@ Modes:
   status   respond with `status_code`
   reset    accept the connection and close it without a response
   timeout  accept, read the request, then hang for `hang_seconds`
+`delay_seconds` adds latency before every successful answer (a slow replica).
 Calling `stop()` closes the listening socket so new connections are refused,
 which is what a killed pod looks like from the gateway.
 """
@@ -22,6 +23,7 @@ class FakeUpstream:
         self.mode = "ok"
         self.status_code = 500
         self.hang_seconds = 5.0
+        self.delay_seconds = 0.0
         self.health_ok = healthy
         self.served = 0
         self.health_hits = 0
@@ -80,6 +82,8 @@ class FakeUpstream:
                 if self.mode == "timeout":
                     await asyncio.sleep(self.hang_seconds)
                     return
+                if self.delay_seconds:
+                    await asyncio.sleep(self.delay_seconds)
                 status = self.status_code if self.mode == "status" else 200
                 self._write(
                     writer,

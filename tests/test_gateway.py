@@ -150,10 +150,88 @@ async def test_metrics_endpoint_exposes_expected_series(harness_factory):
         "failsafe_failovers_total",
         "failsafe_upstream_healthy",
         "failsafe_client_failed_requests_total",
+        "failsafe_load_shed_total",
     ]:
         assert name in text, name
     assert 'failsafe_requests_total{route="/orders",status="200"' in text
     assert "failsafe_upstream_healthy{upstream=" in text
+
+
+async def test_saturated_replica_is_skipped_instead_of_shedding(harness_factory):
+    """With a limit of one per replica, a slow replica fills up and the next request
+    goes to its sibling rather than being shed."""
+    h = await harness_factory(
+        2, timeout=1.0, concurrency={"initial": 1, "min_limit": 1, "max_limit": 1}
+    )
+    slow, fast = h.upstreams
+    slow.delay_seconds = 0.4
+    h.pool._rr = 0
+    shed_before = counter_value("failsafe_load_shed_total", route="/orders")
+
+    first = asyncio.create_task(h.client.get("/orders/1"))
+    await asyncio.sleep(0.05)
+    assert h.pool.get(slow.url).limiter.inflight == 1
+    for _ in range(3):
+        r = await h.client.get("/orders/2")
+        assert r.status_code == 200
+        assert r.json()["served_by"] == "u1"
+    r = await first
+    assert r.status_code == 200 and r.json()["served_by"] == "u0"
+    assert counter_value("failsafe_load_shed_total", route="/orders") == shed_before
+    assert fast.served == 3 and slow.served == 1
+
+
+async def test_all_replicas_saturated_sheds_with_retry_after(harness_factory):
+    h = await harness_factory(
+        1, timeout=1.0, concurrency={"initial": 1, "min_limit": 1, "max_limit": 1}
+    )
+    (u,) = h.upstreams
+    u.delay_seconds = 0.3
+    shed_before = counter_value("failsafe_load_shed_total", route="/orders")
+    failed_before = counter_value("failsafe_client_failed_requests_total", route="/orders")
+
+    first = asyncio.create_task(h.client.get("/orders/1"))
+    await asyncio.sleep(0.05)
+    r = await h.client.get("/orders/2")
+    assert r.status_code == 503
+    assert r.json()["error"] == "overloaded"
+    assert r.headers["Retry-After"] == "1"
+    assert u.served == 1  # the shed request never reached the replica
+    assert (await first).status_code == 200
+    assert counter_value("failsafe_load_shed_total", route="/orders") == shed_before + 1
+    assert counter_value("failsafe_client_failed_requests_total", route="/orders") == failed_before
+    assert (await h.client.get("/orders/3")).status_code == 200  # slot freed again
+
+
+async def test_limit_grows_under_healthy_load_and_shrinks_when_replica_hangs(harness_factory):
+    h = await harness_factory(
+        2,
+        timeout=0.2,
+        concurrency={"initial": 2, "min_limit": 1, "max_limit": 8, "backoff_ratio": 0.5},
+    )
+    u0 = h.upstreams[0]
+    limiters = [h.pool.get(u.url).limiter for u in h.upstreams]
+
+    sem = asyncio.Semaphore(4)  # the pool's combined initial capacity
+
+    async def one() -> int:
+        async with sem:
+            return (await h.client.get("/orders/1")).status_code
+
+    async def drive(n: int) -> list[int]:
+        return list(await asyncio.gather(*(one() for _ in range(n))))
+
+    assert all(s == 200 for s in await drive(100))
+    assert max(lim.limit for lim in limiters) > 2
+    text = (await h.client.get("/metrics")).text
+    assert 'failsafe_concurrency_limit{upstream="' in text
+    assert 'failsafe_concurrency_inflight{upstream="' in text
+
+    grown = limiters[0].limit
+    u0.mode = "timeout"
+    sem = asyncio.Semaphore(2)  # u1 alone must be able to carry the load
+    assert all(s == 200 for s in await drive(40))  # hung attempts fail over to u1
+    assert 1 <= limiters[0].limit < grown
 
 
 async def test_failover_under_load_has_zero_client_failures(harness_factory):
