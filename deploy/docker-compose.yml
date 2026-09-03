@@ -2,8 +2,6 @@ name: failsafe
 
 x-upstream: &upstream
   image: failsafe:dev
-  build:
-    context: ..
   entrypoint: ["python", "-m", "example_upstream"]
   command: ["--port", "9000"]
   healthcheck:
