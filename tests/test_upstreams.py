@@ -1,10 +1,12 @@
 import asyncio
+import json
 
+import httpx
 import pytest
 
 from failsafe.breaker import State
 from failsafe.config import BreakerConfig, HealthCheckConfig, UpstreamConfig
-from failsafe.upstreams import HealthChecker, UpstreamPool
+from failsafe.upstreams import HealthChecker, KubernetesEndpoints, UpstreamPool
 from tests.fake_upstream import FakeUpstream
 
 
@@ -159,3 +161,62 @@ async def test_dns_failure_keeps_existing_replicas(monkeypatch):
 def test_pool_requires_replicas_or_dns():
     with pytest.raises(ValueError):
         UpstreamConfig("svc")
+
+
+def _slice(ips_ready: dict[str, bool]) -> dict:
+    return {
+        "items": [
+            {
+                "ports": [{"name": "http", "port": 9000}],
+                "endpoints": [
+                    {"addresses": [ip], "conditions": {"ready": ready}}
+                    for ip, ready in ips_ready.items()
+                ],
+            }
+        ]
+    }
+
+
+async def test_kubernetes_endpointslice_discovery_tracks_ready_pods():
+    state = {"doc": _slice({"10.1.0.1": True, "10.1.0.2": True, "10.1.0.3": False})}
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=state["doc"])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api")
+    pool = UpstreamPool(
+        UpstreamConfig("svc", kubernetes_service="upstream", kubernetes_namespace="ns", port=9000),
+        BreakerConfig(),
+    )
+    pool.k8s = KubernetesEndpoints("upstream", "ns", client=client, token="tok")
+    await pool.refresh()
+    assert sorted(r.url for r in pool.replicas) == ["http://10.1.0.1:9000", "http://10.1.0.2:9000"]
+    assert seen[0].headers["authorization"] == "Bearer tok"
+    assert "kubernetes.io/service-name%3Dupstream" in str(seen[0].url)
+    assert "/namespaces/ns/endpointslices" in str(seen[0].url)
+
+    state["doc"] = _slice({"10.1.0.2": True, "10.1.0.3": True})
+    await pool.refresh()
+    assert sorted(r.url for r in pool.replicas) == ["http://10.1.0.2:9000", "http://10.1.0.3:9000"]
+
+    state["doc"] = json.loads('{"items": []}')
+    await pool.refresh()
+    assert pool.replicas == []
+    await pool.aclose()
+
+
+async def test_kubernetes_api_failure_keeps_replicas():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"message": "forbidden"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://api")
+    pool = UpstreamPool(
+        UpstreamConfig("svc", kubernetes_service="upstream", replicas=("http://10.9.9.9:9000",)),
+        BreakerConfig(),
+    )
+    pool.k8s = KubernetesEndpoints("upstream", "ns", client=client, token="tok")
+    await pool.refresh()
+    assert [r.url for r in pool.replicas] == ["http://10.9.9.9:9000"]
+    await pool.aclose()

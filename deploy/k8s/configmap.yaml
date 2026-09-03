@@ -13,8 +13,11 @@ data:
 
     upstreams:
       orders:
-        # Headless Service: every ready pod is an A record and becomes a replica.
-        dns: upstream.failsafe.svc.cluster.local.
+        # Every ready endpoint of the Service becomes a replica. EndpointSlices
+        # update within a second; headless DNS would lag behind by its TTL.
+        kubernetes:
+          service: upstream
+          namespace: failsafe
         port: 9000
         health_path: /health
 

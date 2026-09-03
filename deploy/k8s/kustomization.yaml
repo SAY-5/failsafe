@@ -3,6 +3,7 @@ kind: Kustomization
 namespace: failsafe
 resources:
   - namespace.yaml
+  - rbac.yaml
   - configmap.yaml
   - upstream.yaml
   - gateway.yaml

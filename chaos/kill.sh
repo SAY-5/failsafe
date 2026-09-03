@@ -3,7 +3,7 @@
 #   chaos/kill.sh compose DURATION [INTERVAL] [RESTART_AFTER] [LOG]
 #   chaos/kill.sh k8s     DURATION [INTERVAL] [unused]        [LOG]
 # compose mode SIGKILLs a container and starts it again after RESTART_AFTER seconds.
-# k8s mode force-deletes a pod; the Deployment replaces it.
+# k8s mode force-deletes a pod, then waits for the Deployment to be fully ready again.
 set -euo pipefail
 
 MODE=${1:?compose|k8s}
@@ -42,6 +42,14 @@ while [ $SECONDS -lt $end ]; do
       kubectl -n "$NAMESPACE" delete pod "$target" --grace-period=0 --force --wait=false \
         >/dev/null 2>&1 || true
       log kill "$target"
+      # One pod at a time: wait until the Deployment replaced it before the next kill,
+      # otherwise the experiment measures total outage rather than failover.
+      for _ in $(seq 1 60); do
+        want=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.spec.replicas}')
+        have=$(kubectl -n "$NAMESPACE" get deploy upstream -o jsonpath='{.status.readyReplicas}')
+        [ "${have:-0}" = "$want" ] && break
+        sleep 1
+      done
       ;;
     *) echo "unknown mode $MODE" >&2; exit 2 ;;
   esac

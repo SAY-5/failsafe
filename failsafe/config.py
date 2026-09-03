@@ -69,13 +69,15 @@ class UpstreamConfig:
     name: str
     replicas: tuple[str, ...] = ()
     dns: str | None = None
+    kubernetes_service: str | None = None
+    kubernetes_namespace: str | None = None
     port: int = 80
     scheme: str = "http"
     health_path: str = "/health"
 
     def __post_init__(self) -> None:
-        if not self.replicas and not self.dns:
-            raise ValueError(f"upstream {self.name!r} needs either replicas or dns")
+        if not self.replicas and not self.dns and not self.kubernetes_service:
+            raise ValueError(f"upstream {self.name!r} needs replicas, dns or kubernetes.service")
 
 
 @dataclass(frozen=True)
@@ -135,10 +137,13 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
     raw = _expand(raw)
     upstreams: dict[str, UpstreamConfig] = {}
     for name, u in (raw.get("upstreams") or {}).items():
+        k8s = u.get("kubernetes") or {}
         upstreams[name] = UpstreamConfig(
             name=name,
             replicas=tuple(u.get("replicas") or ()),
             dns=u.get("dns"),
+            kubernetes_service=k8s.get("service"),
+            kubernetes_namespace=k8s.get("namespace"),
             port=int(u.get("port", 80)),
             scheme=u.get("scheme", "http"),
             health_path=u.get("health_path", "/health"),

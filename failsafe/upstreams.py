@@ -1,15 +1,17 @@
 """Upstream replica pools: selection, passive failure marking, active health checks,
-and DNS-based discovery for Kubernetes headless Services."""
+and replica discovery through DNS or the Kubernetes EndpointSlice API."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import os
 import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -19,6 +21,85 @@ from failsafe.breaker import CircuitBreaker, State
 from failsafe.config import BreakerConfig, HealthCheckConfig, UpstreamConfig
 
 log = logging.getLogger("failsafe.upstreams")
+
+SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+
+
+class KubernetesEndpoints:
+    """Reads ready pod addresses for a Service from the EndpointSlice API.
+
+    DNS answers for headless Services are cached (kubeadm and kind ship CoreDNS
+    with a 30 second TTL), which is far too slow when pods are being replaced.
+    The EndpointSlice API reflects readiness within a second, so this is the
+    discovery path used in the Kubernetes deployment.
+    """
+
+    def __init__(
+        self,
+        service: str,
+        namespace: str | None = None,
+        *,
+        client: httpx.AsyncClient | None = None,
+        api_base: str | None = None,
+        token: str | None = None,
+    ) -> None:
+        self.service = service
+        self.namespace = namespace or self._read(SERVICE_ACCOUNT_DIR / "namespace") or "default"
+        host = os.environ.get("KUBERNETES_SERVICE_HOST", "kubernetes.default.svc")
+        port = os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+        self.api_base = api_base or f"https://{host}:{port}"
+        self._token = token if token is not None else self._read(SERVICE_ACCOUNT_DIR / "token")
+        self._client = client
+
+    @staticmethod
+    def _read(path: Path) -> str | None:
+        try:
+            return path.read_text().strip()
+        except OSError:
+            return None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            ca = SERVICE_ACCOUNT_DIR / "ca.crt"
+            self._client = httpx.AsyncClient(
+                base_url=self.api_base,
+                verify=str(ca) if ca.exists() else True,
+                timeout=2.0,
+            )
+        return self._client
+
+    async def ready_addresses(self, port_name: str | None = None) -> set[str] | None:
+        """Return ready pod IPs, or None when the API could not be queried."""
+        client = self._get_client()
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        url = (
+            f"/apis/discovery.k8s.io/v1/namespaces/{self.namespace}/endpointslices"
+            f"?labelSelector=kubernetes.io/service-name%3D{self.service}"
+        )
+        try:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            doc = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning(
+                "endpointslice lookup for %s/%s failed: %s", self.namespace, self.service, exc
+            )
+            return None
+        found: set[str] = set()
+        for item in doc.get("items", []):
+            if port_name and not any(p.get("name") == port_name for p in item.get("ports", [])):
+                continue
+            for ep in item.get("endpoints", []):
+                cond = ep.get("conditions", {})
+                if cond.get("ready") is False or cond.get("serving") is False:
+                    continue
+                found.update(ep.get("addresses", []))
+        return found
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
 
 @dataclass
@@ -60,6 +141,11 @@ class UpstreamPool:
         self.clock = clock
         self._replicas: dict[str, Replica] = {}
         self._rr = 0
+        self.k8s: KubernetesEndpoints | None = (
+            KubernetesEndpoints(cfg.kubernetes_service, cfg.kubernetes_namespace)
+            if cfg.kubernetes_service
+            else None
+        )
         for url in cfg.replicas:
             self._add(url.rstrip("/"))
 
@@ -165,29 +251,48 @@ class UpstreamPool:
             if replica.healthy and replica.consecutive_fail >= hc.unhealthy_threshold:
                 self._set_health(replica, False)
 
-    async def refresh_dns(self) -> None:
-        """Resolve the headless Service name and reconcile the replica set."""
-        if not self.cfg.dns:
+    async def refresh(self) -> None:
+        """Reconcile the replica set from the configured discovery source."""
+        if self.k8s is not None:
+            hosts = await self.k8s.ready_addresses()
+        elif self.cfg.dns:
+            hosts = await self._resolve_dns()
+        else:
             return
+        if hosts is None:
+            return  # lookup failed: keep what we have, health checks still run
+        self._reconcile({self._url_for(h) for h in hosts})
+
+    async def refresh_dns(self) -> None:
+        await self.refresh()
+
+    def _url_for(self, host: str) -> str:
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{self.cfg.scheme}://{host}:{self.cfg.port}"
+
+    async def _resolve_dns(self) -> set[str] | None:
+        assert self.cfg.dns is not None
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.getaddrinfo(self.cfg.dns, self.cfg.port, type=socket.SOCK_STREAM)
         except OSError as exc:
             log.warning("dns lookup for %s failed: %s", self.cfg.dns, exc)
-            return
-        found: set[str] = set()
-        for family, _t, _p, _c, sockaddr in infos:
-            host = sockaddr[0]
-            if family == socket.AF_INET6:
-                host = f"[{host}]"
-            found.add(f"{self.cfg.scheme}://{host}:{self.cfg.port}")
+            return None
+        return {sockaddr[0] for _f, _t, _p, _c, sockaddr in infos}
+
+    def _reconcile(self, found: set[str]) -> None:
         for url in found - self._replicas.keys():
-            # A headless Service only lists ready endpoints, so start optimistic.
+            # Discovery only lists ready endpoints, so start optimistic.
             self._add(url, healthy=True)
             log.info("upstream %s discovered replica %s", self.name, url)
         for url in list(self._replicas.keys() - found):
             self._remove(url)
             log.info("upstream %s dropped replica %s", self.name, url)
+
+    async def aclose(self) -> None:
+        if self.k8s is not None:
+            await self.k8s.aclose()
 
 
 class HealthChecker:
@@ -227,6 +332,8 @@ class HealthChecker:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
+        for pool in self.pools.values():
+            await pool.aclose()
 
     async def _loop(self) -> None:
         while True:
@@ -238,7 +345,7 @@ class HealthChecker:
 
     async def check_all(self) -> None:
         for pool in self.pools.values():
-            await pool.refresh_dns()
+            await pool.refresh()
         jobs = [
             self.check_replica(pool, replica)
             for pool in self.pools.values()
