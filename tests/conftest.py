@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import httpx
 import pytest
 from prometheus_client.parser import text_string_to_metric_families
@@ -32,6 +34,8 @@ def gateway_config(
     concurrency: dict | None = None,
     hedge: dict | None = None,
     deadline: float | None = None,
+    canary: dict | None = None,
+    outlier: dict | None = None,
     timeout: float = 0.5,
     interval: float = 0.05,
 ) -> dict:
@@ -46,6 +50,8 @@ def gateway_config(
         "concurrency": concurrency,
         "hedge": hedge,
         "deadline_seconds": deadline,
+        "canary": canary,
+        "outlier": outlier,
     }
     return {
         "health_check": {"interval_seconds": interval, "timeout_seconds": 0.3},
@@ -71,8 +77,12 @@ async def harness_factory():
 
     async def make(n: int = 3, **cfg_kw) -> Harness:
         ups = [await FakeUpstream(f"u{i}").start() for i in range(n)]
+        canary = cfg_kw.get("canary")
+        if canary and "index" in canary:  # replica URLs are only known once started
+            canary = {k: v for k, v in canary.items() if k != "index"}
+            cfg_kw["canary"] = {**canary, "replicas": [ups[cfg_kw["canary"]["index"]].url]}
         config = from_dict(gateway_config([u.url for u in ups], **cfg_kw))
-        gw = Gateway(config)
+        gw = Gateway(config, rng=random.Random(42))
         app = create_app(gateway=gw)
         await gw.startup()
         client = httpx.AsyncClient(

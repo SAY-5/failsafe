@@ -64,11 +64,11 @@ async def test_non_idempotent_post_is_not_retried_but_keyed_post_is(harness_fact
     bad.status_code = 503
     h.pool._rr = 0  # next pick is `bad`
 
-    before = counter_value("failsafe_retries_total", route="/orders")
+    before = counter_value("failsafe_retries_total", route="/orders", reason="status")
     r = await h.client.post("/orders", content=b"{}")
     assert r.status_code == 503
     assert bad.served == 1 and good.served == 0
-    assert counter_value("failsafe_retries_total", route="/orders") == before
+    assert counter_value("failsafe_retries_total", route="/orders", reason="status") == before
 
     h.pool._rr = 0
     r = await h.client.post("/orders", content=b"{}", headers={"Idempotency-Key": "abc"})

@@ -3,6 +3,7 @@
 Modes:
   ok       respond 200 with a JSON echo
   status   respond with `status_code`
+  flaky    respond with `status_code` on every `fail_every`-th request, else 200
   reset    accept the connection and close it without a response
   timeout  accept, read the request, then hang for `hang_seconds`
 `delay_seconds` adds latency before every successful answer (a slow replica).
@@ -22,6 +23,7 @@ class FakeUpstream:
         self.name = name
         self.mode = "ok"
         self.status_code = 500
+        self.fail_every = 2
         self.hang_seconds = 5.0
         self.delay_seconds = 0.0
         self.health_ok = healthy
@@ -84,7 +86,8 @@ class FakeUpstream:
                     return
                 if self.delay_seconds:
                     await asyncio.sleep(self.delay_seconds)
-                status = self.status_code if self.mode == "status" else 200
+                flaky_hit = self.mode == "flaky" and (self.served - 1) % self.fail_every == 0
+                status = self.status_code if self.mode == "status" or flaky_hit else 200
                 self._write(
                     writer,
                     status,
