@@ -106,6 +106,15 @@ def test_canary_and_outlier_are_optional_and_validated():
         from_dict(base(outlier={"base_ejection_seconds": 10, "max_ejection_seconds": 5}))
 
 
+def test_admin_token_is_optional_and_must_not_be_short():
+    assert from_dict(base()).admin_token is None
+    assert from_dict({**base(), "admin_token": ""}).admin_token is None
+    assert from_dict({**base(), "admin_token": "${FAILSAFE_UNSET_TOKEN_XYZ}"}).admin_token is None
+    assert from_dict({**base(), "admin_token": "correct-horse-battery-staple"}).admin_token
+    with pytest.raises(ValueError):
+        from_dict({**base(), "admin_token": "short"})
+
+
 def test_env_expansion_and_dns_upstream(monkeypatch):
     monkeypatch.setenv("SVC_HOST", "svc.ns.svc.cluster.local")
     cfg = from_dict(

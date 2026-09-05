@@ -36,6 +36,7 @@ def gateway_config(
     deadline: float | None = None,
     canary: dict | None = None,
     outlier: dict | None = None,
+    admin_token: str | None = None,
     timeout: float = 0.5,
     interval: float = 0.05,
 ) -> dict:
@@ -55,6 +56,7 @@ def gateway_config(
     }
     return {
         "health_check": {"interval_seconds": interval, "timeout_seconds": 0.3},
+        "admin_token": admin_token,
         "upstreams": {"orders": {"replicas": replicas, "health_path": "/health"}},
         "routes": [route],
     }
