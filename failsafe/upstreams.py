@@ -125,6 +125,7 @@ class Replica:
     stats_window: int = 100
     ejected_until: float = 0.0
     ejections: int = 0
+    draining: bool = False
     label: str = field(init=False)
     stats: deque[tuple[bool, float]] = field(init=False)  # (ok, latency) recent outcomes
 
@@ -134,6 +135,7 @@ class Replica:
         self.stats = deque(maxlen=self.stats_window)
         metrics.UPSTREAM_HEALTHY.labels(upstream=self.label).set(int(self.healthy))
         metrics.UPSTREAM_EJECTED.labels(upstream=self.label).set(0)
+        metrics.UPSTREAM_DRAINING.labels(upstream=self.label).set(0)
         metrics.set_breaker_state(self.label, self.breaker.state)
         if self.limiter is not None:
             metrics.set_concurrency(self.label, self.limiter.limit, self.limiter.inflight)
@@ -144,7 +146,33 @@ class Replica:
 
     @property
     def available(self) -> bool:
-        return self.healthy and self.breaker.state is not State.OPEN and not self.ejected
+        return (
+            self.healthy
+            and not self.draining
+            and self.breaker.state is not State.OPEN
+            and not self.ejected
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        """Operator-facing view of the replica for the admin API."""
+        return {
+            "label": self.label,
+            "url": self.url,
+            "healthy": self.healthy,
+            "available": self.available,
+            "draining": self.draining,
+            "breaker": self.breaker.state.value,
+            "ejected": self.ejected,
+            "ejected_for_seconds": max(0.0, self.ejected_until - self.clock())
+            if self.ejected
+            else 0.0,
+            "ejections": self.ejections,
+            "limit": None if self.limiter is None else self.limiter.limit,
+            "inflight": None if self.limiter is None else self.limiter.inflight,
+            "samples": len(self.stats),
+            "error_rate": round(self.error_rate, 4),
+            "mean_latency": round(self.mean_latency, 4),
+        }
 
     @property
     def error_rate(self) -> float:
@@ -239,6 +267,7 @@ class UpstreamPool:
         if r is not None:
             metrics.UPSTREAM_HEALTHY.labels(upstream=r.label).set(0)
             metrics.UPSTREAM_EJECTED.labels(upstream=r.label).set(0)
+            metrics.UPSTREAM_DRAINING.labels(upstream=r.label).set(0)
 
     def resolve(self, entries: tuple[str, ...] | list[str]) -> set[str]:
         """URLs of the replicas named by URL or host:port label."""
@@ -251,6 +280,30 @@ class UpstreamPool:
 
     def get(self, url: str) -> Replica | None:
         return self._replicas.get(url)
+
+    def get_by_label(self, label: str) -> Replica | None:
+        return next((r for r in self._replicas.values() if r.label == label), None)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "healthy": self.healthy_count(),
+            "available": self.available_count(),
+            "total": len(self._replicas),
+            "replicas": [r.snapshot() for r in self._replicas.values()],
+        }
+
+    def set_draining(self, replica: Replica, draining: bool) -> None:
+        """Stop (or resume) sending new requests to a replica; health checks continue."""
+        if replica.draining == draining:
+            return
+        replica.draining = draining
+        metrics.UPSTREAM_DRAINING.labels(upstream=replica.label).set(int(draining))
+        log.info(
+            "upstream %s replica %s %s",
+            self.name,
+            replica.label,
+            "draining" if draining else "undrained",
+        )
 
     def healthy_count(self) -> int:
         return sum(1 for r in self._replicas.values() if r.healthy)

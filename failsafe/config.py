@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -201,8 +202,11 @@ class GatewayConfig:
     upstreams: dict[str, UpstreamConfig]
     health_check: HealthCheckConfig = field(default_factory=HealthCheckConfig)
     trust_proxy_headers: bool = False
+    admin_token: str | None = None  # bearer token for /admin; None disables the admin API
 
     def __post_init__(self) -> None:
+        if self.admin_token is not None and len(self.admin_token) < 16:
+            raise ValueError("admin_token must be at least 16 characters")
         for route in self.routes:
             if route.upstream not in self.upstreams:
                 raise ValueError(
@@ -278,7 +282,18 @@ def from_dict(raw: dict[str, Any]) -> GatewayConfig:
         upstreams=upstreams,
         health_check=HealthCheckConfig(**hc),
         trust_proxy_headers=bool(raw.get("trust_proxy_headers", False)),
+        admin_token=_secret_or_none(raw.get("admin_token")),
     )
+
+
+def _secret_or_none(value: Any) -> str | None:
+    """A secret left as an unexpanded `${VAR}` reference is unset, not a literal."""
+    if not value:
+        return None
+    text = str(value)
+    if re.fullmatch(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", text):
+        return None
+    return text
 
 
 def _tuplify(d: dict[str, Any], key: str) -> dict[str, Any]:

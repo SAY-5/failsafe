@@ -5,11 +5,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import random
+import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 
 import httpx
-from fastapi import FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
 from failsafe import metrics
@@ -36,6 +37,7 @@ class Gateway:
         self.config = config
         self.clock = clock
         self.rng = rng or random.Random()
+        self.draining = False  # operator drain: readiness off, requests still served
         breaker_by_upstream = {}
         concurrency_by_upstream = {}
         outlier_by_upstream = {}
@@ -96,6 +98,8 @@ class Gateway:
             self._client = None
 
     def ready(self) -> bool:
+        if self.draining:
+            return False
         return any(p.healthy_count() > 0 for p in self.pools.values())
 
     async def handle(self, request: Request) -> Response:
@@ -154,6 +158,59 @@ def create_app(config: GatewayConfig | None = None, gateway: Gateway | None = No
     app = FastAPI(title="FailSafe", docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.gateway = gw
 
+    admin = APIRouter(prefix="/admin", dependencies=[Depends(_admin_guard(gw))])
+
+    @admin.get("/upstreams")
+    async def admin_upstreams() -> dict[str, object]:
+        return {
+            "draining": gw.draining,
+            "upstreams": {name: p.snapshot() for name, p in gw.pools.items()},
+        }
+
+    @admin.post("/upstreams/{name}/replicas/{label}/{action}")
+    async def admin_replica_action(
+        name: str, label: str, action: str, seconds: float | None = None
+    ) -> dict[str, object]:
+        pool = gw.pools.get(name)
+        if pool is None:
+            raise HTTPException(404, f"unknown upstream {name!r}")
+        replica = pool.get_by_label(label)
+        if replica is None:
+            raise HTTPException(404, f"unknown replica {label!r}")
+        if action == "eject":
+            if seconds is not None and seconds <= 0:
+                raise HTTPException(422, "seconds must be > 0")
+            pool.eject(replica, seconds, reason="manual")
+        elif action == "readmit":
+            pool.readmit(replica)
+        elif action == "drain":
+            pool.set_draining(replica, True)
+        elif action == "undrain":
+            pool.set_draining(replica, False)
+        elif action == "reset-breaker":
+            replica.breaker.reset()
+        else:
+            raise HTTPException(404, f"unknown action {action!r}")
+        metrics.ADMIN_ACTIONS.labels(action=action).inc()
+        log.warning("admin: %s on upstream %s replica %s", action, name, label)
+        return replica.snapshot()
+
+    @admin.post("/drain")
+    async def admin_drain() -> dict[str, bool]:
+        gw.draining = True
+        metrics.ADMIN_ACTIONS.labels(action="drain-gateway").inc()
+        log.warning("admin: gateway draining, readiness withdrawn")
+        return {"draining": True}
+
+    @admin.post("/undrain")
+    async def admin_undrain() -> dict[str, bool]:
+        gw.draining = False
+        metrics.ADMIN_ACTIONS.labels(action="undrain-gateway").inc()
+        log.warning("admin: gateway undrained")
+        return {"draining": False}
+
+    app.include_router(admin, include_in_schema=False)
+
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -165,7 +222,10 @@ def create_app(config: GatewayConfig | None = None, gateway: Gateway | None = No
             for name, p in gw.pools.items()
         }
         ok = gw.ready()
-        return JSONResponse({"ready": ok, "upstreams": detail}, status_code=200 if ok else 503)
+        return JSONResponse(
+            {"ready": ok, "draining": gw.draining, "upstreams": detail},
+            status_code=200 if ok else 503,
+        )
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics_endpoint() -> Response:
@@ -177,3 +237,20 @@ def create_app(config: GatewayConfig | None = None, gateway: Gateway | None = No
         return await gw.handle(request)
 
     return app
+
+
+def _admin_guard(gw: Gateway) -> Callable[[Request], None]:
+    """The admin API exists only when a token is configured, and every call must
+    present it as a bearer token."""
+
+    def guard(request: Request) -> None:
+        token = gw.config.admin_token
+        if token is None:
+            raise HTTPException(404, "admin api disabled")
+        scheme, _, value = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(value.strip(), token):
+            raise HTTPException(
+                401, "bearer token required", headers={"WWW-Authenticate": "Bearer"}
+            )
+
+    return guard

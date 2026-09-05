@@ -109,6 +109,16 @@ CANARY_REQUESTS = Counter(
     "Requests routed to the canary subset (canary=true) or to the stable replicas.",
     ["route", "canary"],
 )
+UPSTREAM_DRAINING = Gauge(
+    "failsafe_upstream_draining",
+    "1 while an operator has drained the replica (no new requests), 0 otherwise.",
+    ["upstream"],
+)
+ADMIN_ACTIONS = Counter(
+    "failsafe_admin_actions_total",
+    "Operator actions taken through the admin API.",
+    ["action"],
+)
 LOAD_SHED = Counter(
     "failsafe_load_shed_total",
     "Requests answered 503 because every replica was at its concurrency limit.",
