@@ -1,5 +1,6 @@
 # FailSafe gateway configuration.
 # Environment variables are expanded in string values (e.g. ${UPSTREAM_HOST}).
+admin_token: ${FAILSAFE_ADMIN_TOKEN}   # unset leaves the /admin API disabled
 
 health_check:
   interval_seconds: 1.0

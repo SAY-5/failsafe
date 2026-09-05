@@ -20,6 +20,7 @@ services:
       - "8080:8080"
     environment:
       FAILSAFE_CONFIG: /app/failsafe/routes.yaml
+      FAILSAFE_ADMIN_TOKEN: ${FAILSAFE_ADMIN_TOKEN:-}
     depends_on:
       upstream-1: { condition: service_healthy }
       upstream-2: { condition: service_healthy }

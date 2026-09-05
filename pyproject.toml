@@ -1,6 +1,6 @@
 [project]
 name = "failsafe"
-version = "4.0.0"
+version = "5.0.0"
 description = "Resilient async API gateway: token-bucket rate limiting, circuit breakers, retries with backoff, replica failover, Prometheus metrics"
 readme = "README.md"
 requires-python = ">=3.12"
