@@ -153,6 +153,14 @@ class Forwarder:
         if request.url.query:
             path = f"{path}?{request.url.query}"
 
+        prefer: set[str] | None = None
+        canary_urls: set[str] = set()
+        if route.canary is not None:
+            canary_urls = pool.resolve(route.canary.replicas)
+            is_canary = self._canary(route, request.headers)
+            metrics.CANARY_REQUESTS.labels(route=route.prefix, canary=str(is_canary).lower()).inc()
+            prefer = canary_urls if is_canary else {r.url for r in pool.replicas} - canary_urls
+
         tried: set[str] = set()
         prev: Replica | None = None
         attempt = 0
@@ -160,9 +168,9 @@ class Forwarder:
         while True:
             if deadline is not None and self.clock() >= deadline:
                 return self._deadline_exceeded(route, prev, attempt)
-            replica = pool.pick(exclude=tried)
+            replica = pool.pick(exclude=tried, prefer=prefer)
             if replica is None and tried:
-                replica = pool.pick()  # every replica was tried once; allow a second pass
+                replica = pool.pick(prefer=prefer)  # every replica was tried; second pass
             if replica is None:
                 if pool.saturated():
                     return self._shed(route, pool)
@@ -175,7 +183,7 @@ class Forwarder:
             args = (route, pool, policy, method, path, headers, body, deadline)
             delay = self._hedge_delay(route) if idempotent and not hedged else None
             if delay is not None:
-                result, fired = await self._hedged(replica, delay, tried, *args)
+                result, fired = await self._hedged(replica, delay, tried, prefer, *args)
                 if fired:
                     attempt += 1
                     hedged = True
@@ -183,9 +191,10 @@ class Forwarder:
                 result = await self._attempt(replica, *args)
             replica = result.replica
 
+            canary_hit = replica.url in canary_urls
             if not result.failed:
                 assert result.resp is not None
-                return self._relay(route, replica, result.resp)
+                return self._relay(route, replica, result.resp, canary=canary_hit)
             assert result.kind is not None
             if policy.should_retry(attempt, result.kind, idempotent):
                 backoff = policy.backoff(attempt, self.rng)
@@ -197,9 +206,20 @@ class Forwarder:
                 prev = replica
                 continue
             if result.resp is not None:
-                return self._relay(route, replica, result.resp)
+                return self._relay(route, replica, result.resp, canary=canary_hit)
             status = 504 if result.kind is FailureKind.TIMEOUT else 502
             return self._fail(route, replica, status, result.error)
+
+    def _canary(self, route: RouteConfig, headers: Mapping[str, str]) -> bool:
+        """Header override when configured (1/true/yes or 0/false/no), else the weight."""
+        assert route.canary is not None
+        if route.canary.header:
+            forced = headers.get(route.canary.header.lower(), "").strip().lower()
+            if forced in ("1", "true", "yes"):
+                return True
+            if forced in ("0", "false", "no"):
+                return False
+        return self.rng.random() < route.canary.weight
 
     # ---- attempts ---------------------------------------------------------
 
@@ -266,7 +286,7 @@ class Forwarder:
         return delay
 
     async def _hedged(
-        self, primary: Replica, delay: float, tried: set[str], *args
+        self, primary: Replica, delay: float, tried: set[str], prefer: set[str] | None, *args
     ) -> tuple[Attempt, bool]:
         """Run the attempt on `primary`; if it is still running after `delay`, start a
         second attempt on another replica and return whichever succeeds first. The
@@ -276,7 +296,7 @@ class Forwarder:
         done, _ = await asyncio.wait({first}, timeout=delay)
         if done:
             return first.result(), False
-        other = pool.pick(exclude=tried)
+        other = pool.pick(exclude=tried, prefer=prefer)
         if other is None:
             return await first, False
         tried.add(other.url)
@@ -315,7 +335,9 @@ class Forwarder:
         )
 
     @staticmethod
-    def _relay(route: RouteConfig, replica: Replica, resp: httpx.Response) -> Response:
+    def _relay(
+        route: RouteConfig, replica: Replica, resp: httpx.Response, *, canary: bool = False
+    ) -> Response:
         metrics.REQUESTS.labels(
             route=route.prefix, upstream=replica.label, status=str(resp.status_code)
         ).inc()
@@ -323,6 +345,8 @@ class Forwarder:
             metrics.CLIENT_FAILED.labels(route=route.prefix).inc()
         headers = {k: v for k, v in resp.headers.items() if k.lower() not in RESPONSE_STRIP}
         headers["x-failsafe-upstream"] = replica.label
+        if canary:
+            headers["x-failsafe-canary"] = "1"
         return Response(content=resp.content, status_code=resp.status_code, headers=headers)
 
     @staticmethod
