@@ -181,6 +181,19 @@ never ejects more than `max_ejection_ratio` of its replicas, worst first.
 An ejected replica stays healthy and keeps its breaker; it simply is not
 picked. `eject` and `readmit` are also callable directly for manual control.
 
+## Operator control plane (`app.py`)
+
+The admin router is registered before the catch-all proxy route and guarded
+by a dependency that answers 404 while no `admin_token` is configured and 401
+unless the bearer token matches (compared with `secrets.compare_digest`).
+Replica actions go through the pool, so a manual ejection is the same
+`eject`/`readmit` path the outlier detector uses (reason `manual`), and
+`drain` is a flag on the replica that `available` honours: the replica stays
+healthy, keeps its breaker and its outcome window, and is skipped by `pick`.
+Draining the gateway only flips `Gateway.draining`, which `ready()` reports
+as 503 on `/readyz`; requests are still forwarded so in-flight and late
+arrivals finish while the load balancer stops sending new ones.
+
 ## Upstream pool and health checks (`upstreams.py`)
 
 The pool keeps one `Replica` per address with a health flag, hysteresis

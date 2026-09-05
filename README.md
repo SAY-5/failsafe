@@ -25,6 +25,9 @@ rate limited, timing out, crashing or being killed outright.
 * **Outlier ejection**: a replica whose error rate or latency stands out from
   its peers is taken out of rotation for an escalating cool-down, while a
   service-wide failure ejects nobody.
+* **Operator control plane**: a token-protected `/admin` API to inspect every
+  replica, eject or readmit one, drain it for maintenance, reset its breaker,
+  and drain the gateway itself (readiness off, requests still served).
 * **Active health checks** plus replica discovery from the Kubernetes
   EndpointSlice API (or headless DNS).
 * **Prometheus metrics** for every decision the gateway makes, with a
@@ -67,7 +70,7 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 101 tests, including an in-process failover test
+make lint test  # ruff + 108 tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
 
@@ -294,6 +297,8 @@ no-load latency; a replica that is merely slow is skipped, not shed.
 | `failsafe_canary_requests_total` | route, canary | requests routed to the canary subset (`true`) or the stable replicas |
 | `failsafe_outlier_ejections_total` | upstream, reason | replicas ejected from rotation (`errors`, `latency`, `manual`) |
 | `failsafe_upstream_ejected` | upstream | 1 while the replica is ejected |
+| `failsafe_upstream_draining` | upstream | 1 while an operator has drained the replica |
+| `failsafe_admin_actions_total` | action | operator actions taken through the admin API |
 
 The Grafana dashboard in `monitoring/grafana/dashboards/failsafe.json` shows
 RPS by status, latency percentiles, rate limiting, retries and failovers,
@@ -312,7 +317,42 @@ monitoring/         prometheus.yml, grafana provisioning and dashboard
 tests/              pytest suite
 ```
 
+## Admin API
+
+Set `admin_token` (at least 16 characters; the shipped config reads
+`${FAILSAFE_ADMIN_TOKEN}`, and an unset variable leaves the API disabled so
+`/admin` answers 404). Every call needs `Authorization: Bearer <token>`.
+
+```sh
+T="Authorization: Bearer $FAILSAFE_ADMIN_TOKEN"
+curl -H "$T" localhost:8080/admin/upstreams                    # every replica: health, breaker, ejection, limits, error rate
+curl -H "$T" -X POST localhost:8080/admin/upstreams/orders/replicas/upstream-2:9000/drain
+curl -H "$T" -X POST localhost:8080/admin/upstreams/orders/replicas/upstream-2:9000/undrain
+curl -H "$T" -X POST "localhost:8080/admin/upstreams/orders/replicas/upstream-2:9000/eject?seconds=120"
+curl -H "$T" -X POST localhost:8080/admin/upstreams/orders/replicas/upstream-2:9000/readmit
+curl -H "$T" -X POST localhost:8080/admin/upstreams/orders/replicas/upstream-2:9000/reset-breaker
+curl -H "$T" -X POST localhost:8080/admin/drain                # /readyz turns 503, traffic keeps flowing
+curl -H "$T" -X POST localhost:8080/admin/undrain
+```
+
+A drained replica keeps being health-checked and keeps its breaker; it just
+receives no new requests until undrained. An ejection is the same thing with
+a timer. Draining the gateway is the graceful way to take an instance out of
+a load balancer or a Kubernetes Service before stopping it.
+
 ## Releases
+
+### v5.0.0: operator control plane
+
+`/admin` is a bearer-token API (404 until `admin_token` is configured) that
+lists every upstream replica with its health, breaker state, ejection,
+draining flag, concurrency limit and recent error rate, and acts on one:
+`eject` (optional `seconds`), `readmit`, `drain`, `undrain`,
+`reset-breaker`. `POST /admin/drain` withdraws readiness while the gateway
+keeps serving; `/readyz` reports `draining`. New metrics:
+`failsafe_upstream_draining`, `failsafe_admin_actions_total`. An unexpanded
+`${VAR}` token reference is treated as unset instead of a literal secret.
+7 new tests (108 total).
 
 ### v4.0.0: canary routing and outlier ejection
 
