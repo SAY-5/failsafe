@@ -10,6 +10,8 @@ client ──> route match ──> token bucket ──> forward (retry + failove
                                                 ├── concurrency limit per replica (503 when all full)
                                                 ├── hedge after p95 on another replica
                                                 ├── deadline budget (504 when exhausted)
+                                                ├── canary subset first, stable fallback
+                                                ├── outlier-ejected replicas skipped
                                                 ├── health state per replica
                                                 └── Prometheus counters
 ```
@@ -148,6 +150,36 @@ services shares one budget instead of multiplying timeouts. Before a retry the
 forwarder checks that the backoff would end before the deadline; otherwise it
 stops and answers `504 deadline exceeded`, which is counted in
 `failsafe_deadline_exceeded_total` and in the client-failed counter.
+
+## Canary routing (`proxy.py`, `upstreams.py`)
+
+The forwarder decides once per request whether it is canary traffic: the
+configured header wins when present (`1`/`true`/`yes` or `0`/`false`/`no`),
+otherwise a draw against `canary.weight`. The decision becomes a preferred
+subset of replica URLs handed to `pool.pick(prefer=...)`: canary requests
+prefer the canary replicas, stable requests prefer everything else, and in
+both cases the other side is used only when no preferred replica is healthy,
+admitted by its breaker and under its concurrency limit. Retries and hedges
+keep the same preference. A response served by a canary replica carries
+`x-failsafe-canary: 1` so a client or a dashboard can split by cohort.
+
+## Outlier ejection (`upstreams.py`)
+
+Each replica keeps a window of its last `outlier.window` outcomes: success or
+error (non-connect failures and retryable statuses) with the attempt latency.
+After every health-check round the pool first readmits replicas whose
+cool-down expired, then judges every non-ejected replica that has at least
+`min_requests` samples, provided at least `min_replicas` of them exist. A
+replica is ejected for errors when its error rate reaches `error_ratio` and
+`error_factor` times the median error rate of its peers, or for latency when
+its mean latency is above `min_latency_seconds` and `latency_factor` times
+the peers' median. Comparing against peers is what separates a bad replica
+from a bad day: when every replica fails alike, nobody is ejected and the
+breakers handle it. Ejection lasts `base_ejection_seconds` times the
+replica's ejection count, capped at `max_ejection_seconds`, and the pool
+never ejects more than `max_ejection_ratio` of its replicas, worst first.
+An ejected replica stays healthy and keeps its breaker; it simply is not
+picked. `eject` and `readmit` are also callable directly for manual control.
 
 ## Upstream pool and health checks (`upstreams.py`)
 

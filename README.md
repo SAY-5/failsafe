@@ -19,6 +19,12 @@ rate limited, timing out, crashing or being killed outright.
 * **End-to-end deadlines**: `X-Request-Timeout` / `X-Request-Deadline` (or a
   route default) bound the whole request, are propagated to upstreams with
   the remaining budget, and stop retries that could not finish in time.
+* **Canary routing**: a weighted share of a route's traffic goes to a named
+  subset of replicas, a header can force either side, and canary traffic
+  falls back to the stable replicas when the canary cannot take it.
+* **Outlier ejection**: a replica whose error rate or latency stands out from
+  its peers is taken out of rotation for an escalating cool-down, while a
+  service-wide failure ejects nobody.
 * **Active health checks** plus replica discovery from the Kubernetes
   EndpointSlice API (or headless DNS).
 * **Prometheus metrics** for every decision the gateway makes, with a
@@ -61,7 +67,7 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 88 tests, including an in-process failover test
+make lint test  # ruff + 101 tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
 
@@ -220,6 +226,18 @@ routes:
       min_samples: 50          # samples needed before the percentile is trusted
       # after_ms: 25           # fixed delay instead of the percentile
     # deadline_seconds: 5.0    # default end-to-end budget per request
+    canary:                    # omit to spread traffic evenly
+      replicas: [http://upstream-3:9000]       # URLs or host:port labels
+      weight: 0.1              # share of requests sent to the canary subset
+      header: X-Canary         # 1/true forces canary, 0/false forces stable
+    outlier:                   # omit to disable outlier ejection
+      window: 100              # recent outcomes kept per replica
+      min_requests: 20         # samples a replica needs before it is judged
+      error_ratio: 0.2         # error rate needed, and 3x the peers' median
+      latency_factor: 3.0      # mean latency above 3x the peers' median (and 50 ms)
+      max_ejection_ratio: 0.5  # never eject more than half the pool
+      base_ejection_seconds: 30
+      max_ejection_seconds: 300
 ```
 
 Retry rules: GET, HEAD, PUT, DELETE and OPTIONS are retried on connection
@@ -273,6 +291,9 @@ no-load latency; a replica that is merely slow is skipped, not shed.
 | `failsafe_hedge_wins_total` | route | requests answered by the hedge rather than the first attempt |
 | `failsafe_hedge_delay_seconds` | route | current hedge delay (observed latency percentile) |
 | `failsafe_deadline_exceeded_total` | route | requests answered 504 because the deadline ran out |
+| `failsafe_canary_requests_total` | route, canary | requests routed to the canary subset (`true`) or the stable replicas |
+| `failsafe_outlier_ejections_total` | upstream, reason | replicas ejected from rotation (`errors`, `latency`, `manual`) |
+| `failsafe_upstream_ejected` | upstream | 1 while the replica is ejected |
 
 The Grafana dashboard in `monitoring/grafana/dashboards/failsafe.json` shows
 RPS by status, latency percentiles, rate limiting, retries and failovers,
@@ -292,6 +313,22 @@ tests/              pytest suite
 ```
 
 ## Releases
+
+### v4.0.0: canary routing and outlier ejection
+
+A route can name a canary subset of replicas (`canary.replicas`, by URL or
+host:port label) and a `weight`; that share of requests is served by the
+subset, everything else avoids it, and either side can be forced with the
+configured header. Canary traffic that finds no canary replica available is
+served by the stable ones, so a dead canary costs nothing. Every replica now
+keeps a window of recent outcomes; on each health-check round a replica whose
+error rate is at least `error_ratio` and three times its peers' median, or
+whose mean latency is three times its peers' median (and above a floor), is
+ejected for `base_ejection_seconds` times its ejection count, capped, and
+never beyond `max_ejection_ratio` of the pool. Responses served by a canary
+carry `x-failsafe-canary: 1`. New metrics: `failsafe_canary_requests_total`,
+`failsafe_outlier_ejections_total`, `failsafe_upstream_ejected`. 13 new tests
+(101 total).
 
 ### v3.0.0: request hedging and deadline propagation
 
