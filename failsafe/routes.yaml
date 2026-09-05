@@ -52,3 +52,11 @@ routes:
       min_samples: 50          # after_ms: 25 would use a fixed delay instead
     # deadline_seconds: 5.0    # default end-to-end budget; clients tighten it with
                                # X-Request-Timeout (seconds) or X-Request-Deadline (epoch)
+    canary:                    # omit to spread traffic evenly
+      replicas: [http://upstream-3:9000]
+      weight: 0.1              # share of requests sent to the canary subset
+      header: X-Canary         # 1/true forces canary, 0/false forces stable
+    outlier:                   # omit to disable outlier ejection
+      min_requests: 20
+      base_ejection_seconds: 10
+      max_ejection_seconds: 60
