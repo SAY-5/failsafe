@@ -30,6 +30,23 @@ jobs:
       - run: docker buildx build --load -t failsafe:dev .
       - run: docker run --rm --entrypoint python failsafe:dev -c "import failsafe, os; print(failsafe.__version__, os.getuid())"
 
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/package.json
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run selfcheck
+      - run: npm run build
+
   chaos:
     needs: test
     runs-on: ubuntu-latest
