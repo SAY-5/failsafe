@@ -342,6 +342,19 @@ a load balancer or a Kubernetes Service before stopping it.
 
 ## Releases
 
+### v5.0.1: browser demo toolchain patch
+
+The browser demo under `web/` moves from Vite 5.4.21 to 7.3.6 and
+`@vitejs/plugin-react` from 4.7.0 to 5.2.0, which drops the esbuild 0.21.5
+that Vite 5 carried, and `web/package.json` declares node
+`^20.19.0 || >=22.12.0`, the range both packages require. `npm audit` over
+`web/package-lock.json` reported esbuild (moderate, GHSA-67mh-4wv8-2f99) and
+Vite (high, three advisories including GHSA-fx2h-pf6j-xcff) at v5.0.0 and
+reports 0 vulnerabilities at v5.0.1. A `web` CI job runs `npm ci`, the
+type-check, the 43 self-check assertions and the production bundle. The
+gateway is unchanged, and both chaos suites still kill replicas under load
+with 0 client-visible failures. No new tests (108 total).
+
 ### v5.0.0: operator control plane
 
 `/admin` is a bearer-token API (404 until `admin_token` is configured) that
