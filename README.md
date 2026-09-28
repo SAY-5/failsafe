@@ -70,9 +70,13 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 108 tests, including an in-process failover test
+make lint test  # ruff + regression tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
+
+The configuration policy tests require the Docker Compose CLI (no running Docker
+daemon is needed). They render the real Compose file with an empty environment
+file and run the Grafana startup guard with non-secret fixtures.
 
 Run the whole stack with three upstream replicas, Prometheus and Grafana:
 
@@ -80,8 +84,42 @@ Run the whole stack with three upstream replicas, Prometheus and Grafana:
 docker compose -f deploy/docker-compose.yml --profile observability up --build
 curl -s localhost:8080/orders/42 -H 'X-API-Key: demo'
 curl -s localhost:8080/metrics | grep failsafe_
-open http://localhost:3000/d/failsafe     # dashboard, anonymous admin
+open http://localhost:3000/d/failsafe     # read-only dashboard, anonymous Viewer
 ```
+
+Prometheus (`9090`) and Grafana (`3000`) publish only on `127.0.0.1` by default.
+Grafana still queries `http://prometheus:9090` on the Compose network. The
+provisioned dashboard is read-only: anonymous access has the Viewer role,
+basic authentication and the login form are disabled, and a random initial
+administrator password is generated on startup without being printed.
+Gateway and upstream networking is unchanged by these observability defaults.
+
+For viewing from another machine, prefer an authenticated SSH tunnel to these
+loopback ports. If you deliberately publish Grafana on a network interface,
+set `FAILSAFE_GRAFANA_BIND_ADDRESS` and supply `FAILSAFE_GRAFANA_ADMIN_PASSWORD`
+through your process environment. The entrypoint rejects missing, whitespace-only,
+or fewer-than-16-character passwords, disables anonymous access, and enables
+authenticated login. Use a unique, password-manager-generated value; do not put
+it in a command, committed file, or shared terminal log. Prometheus stays private.
+
+Use a **fresh, separately named Compose project** for this authenticated mode:
+
+```bash
+# First export FAILSAFE_GRAFANA_ADMIN_PASSWORD securely in your own shell.
+FAILSAFE_GRAFANA_BIND_ADDRESS=127.0.0.2 \
+  docker compose --env-file /dev/null -p failsafe-authenticated \
+  -f deploy/docker-compose.yml --profile observability up -d prometheus grafana
+```
+
+This example uses another local address so you can verify authenticated login
+before choosing a real network address. Only the exact default loopbacks
+`127.0.0.1` and `::1` select anonymous local viewing. Do not reuse a database
+from a previous local or remotely accessible deployment: Grafana's initial
+password setting does **not** rotate existing accounts. Existing deployments
+need an explicit account/credential audit and rotation; this patch does not
+erase their data or repair existing accounts. Add TLS termination, firewall
+restrictions and appropriate identity management before network exposure.
+This demo is not a production deployment security configuration.
 
 ## Chaos demo: `make chaos`
 
