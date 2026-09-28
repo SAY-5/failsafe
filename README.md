@@ -70,9 +70,13 @@ Built with FastAPI, httpx, uvicorn and prometheus-client on Python 3.12.
 
 ```bash
 make setup      # uv venv + dependencies
-make lint test  # ruff + 108 tests, including an in-process failover test
+make lint test  # ruff + regression tests, including an in-process failover test
                 # (1200 requests while one replica is killed and another hangs)
 ```
+
+The configuration policy tests require the Docker Compose CLI (no running Docker
+daemon is needed). They render the real Compose file with an empty environment
+file and run the Grafana startup guard with non-secret fixtures.
 
 Run the whole stack with three upstream replicas, Prometheus and Grafana:
 
