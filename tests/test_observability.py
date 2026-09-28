@@ -73,6 +73,7 @@ class ObservabilityPolicyTest(unittest.TestCase):
         services = compose_config(FAILSAFE_GRAFANA_BIND_ADDRESS="0.0.0.0")
         grafana = services["grafana"]
         self.assertEqual(grafana["ports"][0]["host_ip"], "0.0.0.0")
+        self.assertEqual(grafana["environment"]["FAILSAFE_GRAFANA_BIND_ADDRESS"], "0.0.0.0")
         self.assertEqual(services["prometheus"]["ports"][0]["host_ip"], "127.0.0.1")
         self.assertEqual(
             grafana["entrypoint"],
@@ -86,6 +87,19 @@ class ObservabilityPolicyTest(unittest.TestCase):
         ):
             self.assertTrue(mounts[target]["read_only"])
             self.assertTrue(mounts[target]["source"].endswith(suffix))
+
+    def test_actual_compose_environment_cannot_start_remote_anonymous_grafana(self):
+        for password in ("", "fixture-only-remote-password"):
+            services = compose_config(
+                FAILSAFE_GRAFANA_BIND_ADDRESS="192.0.2.7",
+                FAILSAFE_GRAFANA_ADMIN_PASSWORD=password,
+            )
+            result = start_grafana(**services["grafana"]["environment"])
+            if password:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(environment_of(result)["GF_AUTH_ANONYMOUS_ENABLED"], "false")
+            else:
+                self.assertEqual(result.returncode, 64)
 
     def test_local_startup_keeps_viewer_and_replaces_known_initial_password(self):
         result = start_grafana(GF_SECURITY_ADMIN_PASSWORD="admin")
