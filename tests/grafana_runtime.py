@@ -168,7 +168,10 @@ class GrafanaRuntimeTest(unittest.TestCase):
         status, body = self.request(
             port, "/login", method="POST", body={"user": "admin", "password": PASSWORD}
         )
-        self.assertIn(status, (401, 403), body)
+        # With basic authentication disabled, Grafana 11.1 refuses the login
+        # client itself, rather than treating the supplied password as invalid.
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body.get("messageId"), "auth.client.notConfigured")
 
     def assert_auth_required(self, port):
         for path in ("/api/dashboards/uid/failsafe", "/api/datasources/uid/prometheus"):
