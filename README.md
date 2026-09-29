@@ -94,6 +94,12 @@ basic authentication and the login form are disabled, and a random initial
 administrator password is generated on startup without being printed.
 Gateway and upstream networking is unchanged by these observability defaults.
 
+To require authenticated login on localhost too, set
+`FAILSAFE_GRAFANA_REQUIRE_AUTH=1` and supply a strong
+`FAILSAFE_GRAFANA_ADMIN_PASSWORD`. The flag accepts only `0` (the default) or
+`1`; malformed or empty values stop startup. A non-loopback binding always
+requires authentication, even with the flag set to `0`.
+
 For viewing from another machine, prefer an authenticated SSH tunnel to these
 loopback ports. If you deliberately publish Grafana on a network interface,
 set `FAILSAFE_GRAFANA_BIND_ADDRESS` and supply `FAILSAFE_GRAFANA_ADMIN_PASSWORD`
@@ -102,24 +108,41 @@ or fewer-than-16-character passwords, disables anonymous access, and enables
 authenticated login. Use a unique, password-manager-generated value; do not put
 it in a command, committed file, or shared terminal log. Prometheus stays private.
 
-Use a **fresh, separately named Compose project** for this authenticated mode:
+Use a **fresh, separately named Compose project** for this authenticated mode.
+Stop the previous observability stack first if it occupies ports 9090 or 3000:
 
 ```bash
 # First export FAILSAFE_GRAFANA_ADMIN_PASSWORD securely in your own shell.
-FAILSAFE_GRAFANA_BIND_ADDRESS=127.0.0.2 \
+FAILSAFE_GRAFANA_BIND_ADDRESS=127.0.0.1 FAILSAFE_GRAFANA_REQUIRE_AUTH=1 \
   docker compose --env-file /dev/null -p failsafe-authenticated \
   -f deploy/docker-compose.yml --profile observability up -d prometheus grafana
 ```
 
-This example uses another local address so you can verify authenticated login
-before choosing a real network address. Only the exact default loopbacks
-`127.0.0.1` and `::1` select anonymous local viewing. Do not reuse a database
+This example keeps Grafana on the standard IPv4 loopback, including on macOS,
+so you can verify authenticated login before choosing a real network address.
+Only the exact loopbacks `127.0.0.1` and `::1`, without the authentication opt-in,
+select anonymous local viewing. Do not reuse a database
 from a previous local or remotely accessible deployment: Grafana's initial
 password setting does **not** rotate existing accounts. Existing deployments
 need an explicit account/credential audit and rotation; this patch does not
 erase their data or repair existing accounts. Add TLS termination, firewall
 restrictions and appropriate identity management before network exposure.
 This demo is not a production deployment security configuration.
+
+The `grafana-runtime` CI job starts the actual Grafana 11.1.0 image through this
+Compose configuration on ephemeral loopback ports. It checks provisioning,
+anonymous read-only access, authenticated local and remote-policy modes,
+literal password handling, and startup refusal for unsafe configuration.
+To run that integration check locally after obtaining the image:
+
+```bash
+docker pull grafana/grafana:11.1.0
+python3 -m unittest tests.grafana_runtime -v
+```
+
+The check does not build the gateway or start Prometheus; it verifies the
+provisioned datasource configuration, not live Prometheus query results.
+It uses disposable projects and removes only its own containers and networks.
 
 ## Chaos demo: `make chaos`
 
@@ -379,6 +402,16 @@ a timer. Draining the gateway is the graceful way to take an instance out of
 a load balancer or a Kubernetes Service before stopping it.
 
 ## Releases
+
+### v5.0.2: portable authenticated Grafana
+
+`FAILSAFE_GRAFANA_REQUIRE_AUTH=1` enables authenticated Grafana on ordinary
+localhost without requiring an alternate loopback alias. Existing anonymous
+Viewer defaults remain unchanged. Remote bindings still require a configured
+password; malformed flags and weak passwords fail closed. CI now boots the
+real Grafana image and exercises provisioning and authorization over HTTP.
+The gateway and its traffic policies are unchanged. These initial password
+settings do not rotate credentials in an existing Grafana database.
 
 ### v5.0.1: browser demo toolchain patch
 

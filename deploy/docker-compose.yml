@@ -52,6 +52,7 @@ services:
     entrypoint: ["/bin/sh", "/etc/failsafe/grafana-entrypoint.sh", "/run.sh"]
     environment:
       FAILSAFE_GRAFANA_BIND_ADDRESS: ${FAILSAFE_GRAFANA_BIND_ADDRESS:-127.0.0.1}
+      FAILSAFE_GRAFANA_REQUIRE_AUTH: ${FAILSAFE_GRAFANA_REQUIRE_AUTH-0}
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_AUTH_DISABLE_LOGIN_FORM: "true"

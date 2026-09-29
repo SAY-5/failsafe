@@ -49,6 +49,18 @@ jobs:
       - run: npm run selfcheck
       - run: npm run build
 
+  grafana-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain the Compose-pinned Grafana image
+        run: docker pull grafana/grafana:11.1.0
+      - name: Verify real Grafana provisioning and authorization
+        run: python3 -m unittest tests.grafana_runtime -v
+
   chaos:
     needs: test
     runs-on: ubuntu-latest

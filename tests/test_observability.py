@@ -111,6 +111,84 @@ class ObservabilityPolicyTest(unittest.TestCase):
         self.assertEqual(settings["GF_AUTH_DISABLE_LOGIN_FORM"], "true")
         self.assertRegex(settings["GF_SECURITY_ADMIN_PASSWORD"], r"^[0-9a-f]{64}$")
 
+    def test_compose_can_require_authentication_without_publishing_beyond_loopback(self):
+        # `compose config` escapes dollar signs for re-parsing; the real-container
+        # suite verifies literal metacharacters through Compose itself.
+        password = "fixture-strong-enough-password"
+        grafana = compose_config(
+            FAILSAFE_GRAFANA_REQUIRE_AUTH="1",
+            FAILSAFE_GRAFANA_ADMIN_PASSWORD=password,
+        )["grafana"]
+        self.assertEqual(grafana["ports"][0]["host_ip"], "127.0.0.1")
+        result = start_grafana(**grafana["environment"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        settings = environment_of(result)
+        self.assertEqual(settings["GF_AUTH_ANONYMOUS_ENABLED"], "false")
+        self.assertEqual(settings["GF_AUTH_BASIC_ENABLED"], "true")
+        self.assertEqual(settings["GF_AUTH_DISABLE_LOGIN_FORM"], "false")
+        self.assertEqual(settings["GF_SECURITY_ADMIN_PASSWORD"], password)
+
+    def test_compose_does_not_replace_an_explicitly_empty_auth_flag_with_the_default(self):
+        grafana = compose_config(FAILSAFE_GRAFANA_REQUIRE_AUTH="")["grafana"]
+        result = start_grafana(**grafana["environment"])
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("FAILSAFE_GRAFANA_REQUIRE_AUTH", result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_explicit_loopback_auth_requires_a_strong_literal_password(self):
+        for address in ("127.0.0.1", "::1"):
+            for password in ("", "short", " " * 16):
+                with self.subTest(address=address, password=password):
+                    result = start_grafana(
+                        FAILSAFE_GRAFANA_BIND_ADDRESS=address,
+                        FAILSAFE_GRAFANA_REQUIRE_AUTH="1",
+                        GF_SECURITY_ADMIN_PASSWORD=password,
+                    )
+                    self.assertEqual(result.returncode, 64)
+                    self.assertIn("configured password", result.stderr)
+                    self.assertEqual(result.stdout, "")
+            password = "fixture-$(printf injected)-'long-password"
+            result = start_grafana(
+                FAILSAFE_GRAFANA_BIND_ADDRESS=address,
+                FAILSAFE_GRAFANA_REQUIRE_AUTH="1",
+                GF_SECURITY_ADMIN_PASSWORD=password,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            settings = environment_of(result)
+            self.assertEqual(settings["GF_AUTH_ANONYMOUS_ENABLED"], "false")
+            self.assertEqual(settings["GF_AUTH_ANONYMOUS_ORG_ROLE"], "Viewer")
+            self.assertEqual(settings["GF_AUTH_BASIC_ENABLED"], "true")
+            self.assertEqual(settings["GF_AUTH_DISABLE_LOGIN_FORM"], "false")
+            self.assertEqual(settings["GF_SECURITY_ADMIN_PASSWORD"], password)
+
+    def test_malformed_auth_flag_fails_closed_on_all_bindings(self):
+        for address in ("127.0.0.1", "::1", "0.0.0.0"):
+            for flag in ("", "true", "false", "2", " 1", "1 ", "00"):
+                with self.subTest(address=address, flag=flag):
+                    result = start_grafana(
+                        FAILSAFE_GRAFANA_BIND_ADDRESS=address,
+                        FAILSAFE_GRAFANA_REQUIRE_AUTH=flag,
+                        GF_SECURITY_ADMIN_PASSWORD="fixture-strong-enough-password",
+                    )
+                    self.assertEqual(result.returncode, 64)
+                    self.assertIn("FAILSAFE_GRAFANA_REQUIRE_AUTH", result.stderr)
+                    self.assertEqual(result.stdout, "")
+
+    def test_explicit_zero_preserves_loopback_viewer_but_never_bypasses_remote_auth(self):
+        for address in ("127.0.0.1", "::1", "0.0.0.0"):
+            with self.subTest(address=address):
+                result = start_grafana(
+                    FAILSAFE_GRAFANA_BIND_ADDRESS=address,
+                    FAILSAFE_GRAFANA_REQUIRE_AUTH="0",
+                )
+                if address == "0.0.0.0":
+                    self.assertEqual(result.returncode, 64)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    settings = environment_of(result)
+                    self.assertEqual(settings["GF_AUTH_ANONYMOUS_ENABLED"], "true")
+                    self.assertEqual(settings["GF_AUTH_BASIC_ENABLED"], "false")
+
     def test_remote_startup_fails_closed_without_a_configured_password(self):
         for address in ("0.0.0.0", "192.0.2.7", "::", "localhost"):
             for password in (None, "", "admin", "dev-token", "short", " " * 16):
