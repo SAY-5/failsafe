@@ -403,6 +403,18 @@ a load balancer or a Kubernetes Service before stopping it.
 
 ## Releases
 
+### v5.0.3: browser demo dependency patch
+
+`web/package-lock.json` moves Vite from 7.3.6 to 7.3.7 (GHSA-587h-7wmj-h5pm,
+GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-9jrq-w75r-8gcw,
+GHSA-rq7h-c2jc-7f22) and source-map-js from 1.2.1 to 1.2.2
+(GHSA-68fv-2mgg-jv7q). These advisories concern the Vite development server
+and source map parsing in the build toolchain, not the static files the built
+demo serves. The gateway's Python dependencies are ranges in `pyproject.toml`;
+resolved for Python 3.12 on 2026-10-25 they gave 32 pinned packages, and
+neither an OSV query nor pip-audit reported an advisory for any of them. The
+gateway itself is unchanged apart from its version string.
+
 ### v5.0.2: portable authenticated Grafana
 
 `FAILSAFE_GRAFANA_REQUIRE_AUTH=1` enables authenticated Grafana on ordinary
